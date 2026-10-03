@@ -1,9 +1,9 @@
 """NSGA-II optimization and comparison of estimated BWR startup procedures.
 
-Without STARTUP_SIMULATOR, results use an explicitly illustrative estimate model
-based on qualitative, literature-informed trends. They are not reactor
-simulations or predictive correlations. A configured validated simulator can
-replace the estimates through the existing adapter interface.
+Without STARTUP_SIMULATOR, results use an explicitly unvalidated heuristic
+model. The qualitative directions are informed by startup-instability
+literature, but the equations and coefficients are project assumptions, not
+published correlations. The outputs are not reactor simulations or predictions.
 """
 
 from __future__ import annotations
@@ -28,8 +28,8 @@ from pymoo.optimize import minimize
 
 
 DEFAULT_HOLD_SCHEDULES = ((), (25,), (25, 50), (25, 50, 75))
-FLASHING_THRESHOLD_PRESSURE_MPA = 0.4
-STABLE_TWO_PHASE_PRESSURE_MPA = 0.7
+DEMO_FLASHING_CUTOFF_PRESSURE_MPA = 0.4
+DEMO_TWO_PHASE_REFERENCE_PRESSURE_MPA = 0.7
 OBJECTIVES = (
     "startup_time_minutes",
     "flashing_margin",
@@ -41,7 +41,7 @@ OBJECTIVES = (
 MAXIMIZE_OBJECTIVES = frozenset({"flashing_margin"})
 MetricRunner = Callable[[dict[str, Any]], Mapping[str, Any]]
 STABILITY_COLUMNS = {
-    "Flashing margin": "flashing_margin",
+    "Flashing-margin score": "flashing_margin",
     "Density-wave oscillation index": "density_wave_oscillation_index",
     "Pressure oscillation index": "pressure_oscillation_index",
 }
@@ -117,7 +117,7 @@ class StartupProcedure:
 
 @dataclass(frozen=True)
 class BaselineStartupProcedure(StartupProcedure):
-    """Reference procedure used for the literature-informed comparison."""
+    """Reference inputs used for the illustrative profile comparison."""
 
     power_ramp_rate: float = 2.5
     pressure_ramp_rate: float = 0.8
@@ -158,7 +158,7 @@ class OptimizedStartupProcedure(StartupProcedure):
 class SimulationMetrics:
     """Metrics supplied by simulator post-processing, not calculated here.
 
-    The estimate model uses higher flashing margin as better and minimizes the
+    The heuristic demo treats higher flashing score as better and minimizes the
     two indices and remaining objectives. Units and definitions for simulator
     outputs must be supplied by each backend.
     """
@@ -231,12 +231,12 @@ class StartupSimulator(Protocol):
         ...
 
 
-class LiteratureBasedEstimateSimulator:
-    """Illustrative sensitivity model for demonstrating the optimization flow.
+class IllustrativeHeuristicSimulator:
+    """Unvalidated heuristic model for demonstrating the optimization flow.
 
-    The factors below implement qualitative relationships, not literature-
-    derived correlations. Replace this model with validated MOOSE THM or
-    OpenFOAM/GeN-Foam post-processing when those integrations are available.
+    Qualitative directions are motivated by BWR instability research, but the
+    equations and coefficients below are project assumptions, not literature-
+    derived correlations. Replace this model with validated transient outputs.
     """
 
     def evaluate(self, procedure: StartupProcedure) -> SimulationMetrics:
@@ -255,9 +255,17 @@ class LiteratureBasedEstimateSimulator:
         # These threshold adjustments are illustrative, not validated criteria.
         flashing_pressure = procedure.boiling_initiation_pressure
         flashing_margin = (
-            flashing_pressure - FLASHING_THRESHOLD_PRESSURE_MPA
-            + (0.1 if flashing_pressure >= STABLE_TWO_PHASE_PRESSURE_MPA else 0.0)
-            - (0.2 if flashing_pressure < FLASHING_THRESHOLD_PRESSURE_MPA else 0.0)
+            flashing_pressure - DEMO_FLASHING_CUTOFF_PRESSURE_MPA
+            + (
+                0.1
+                if flashing_pressure >= DEMO_TWO_PHASE_REFERENCE_PRESSURE_MPA
+                else 0.0
+            )
+            - (
+                0.2
+                if flashing_pressure < DEMO_FLASHING_CUTOFF_PRESSURE_MPA
+                else 0.0
+            )
             + (initial.pressure_mpa - 0.1) * 0.02
             - (procedure.power_ramp_rate - 0.5) * 0.04
             + (procedure.inlet_subcooling - 5.0) * 0.006
@@ -623,7 +631,7 @@ def create_pareto_plots(
     if pareto.empty:
         pareto = results.copy()
     metric_specs = (
-        ("Flashing Margin", "flashing_margin", "MPa-equivalent estimate"),
+        ("Flashing-margin score", "flashing_margin", "Arbitrary score"),
         ("DWO Index", "density_wave_oscillation_index", "Index (backend-defined)"),
         (
             "Pressure Oscillation Index",
@@ -764,7 +772,7 @@ def generate_report(results: pd.DataFrame) -> str:
         f"Initial temperature: {best['initial_temperature_c']:.1f} C",
         f"Hold point schedule: {hold_schedule}",
         f"Startup time: {best['startup_time_minutes']:.2f} minutes",
-        f"Flashing margin: {best['flashing_margin']:.3f} MPa-equivalent estimate",
+        f"Flashing-margin score (arbitrary units): {best['flashing_margin']:.3f}",
         f"DWO index: {best['density_wave_oscillation_index']:.3f}",
         f"Pressure oscillation index: {best['pressure_oscillation_index']:.3f}",
         f"Thermal stress: {best['thermal_stress']:.3f}",
@@ -778,7 +786,7 @@ def generate_report(results: pd.DataFrame) -> str:
             f"{rank}. score={candidate['decision_support_score']:.4f}, "
             f"time={candidate['startup_time_minutes']:.2f} min, "
             f"cost={candidate['startup_cost']:.3f}, "
-            f"stability=(margin {candidate['flashing_margin']:.3f}, "
+            f"stability=(flashing score {candidate['flashing_margin']:.3f}, "
             f"DWO {candidate['density_wave_oscillation_index']:.3f}, "
             f"pressure oscillation {candidate['pressure_oscillation_index']:.3f})"
         )
@@ -791,8 +799,8 @@ def generate_report(results: pd.DataFrame) -> str:
         "",
         "This recommendation depends on the configured backend or estimate "
         "model and its assumptions. It is not a plant operating procedure.",
-        "When the built-in estimate model is active, these are illustrative "
-        "literature-informed estimates, not predictive reactor simulations.",
+        "When the built-in model is active, these are unvalidated heuristic "
+        "scores, not literature-derived correlations or reactor simulations.",
         ]
     )
     return "\n".join(lines)
@@ -834,7 +842,7 @@ def generate_priority_summary_chart(
     """Show the clear winner for each priority mode."""
     if results.empty:
         raise ValueError("Cannot summarize priorities from an empty result set.")
-    simulator = simulator or LiteratureBasedEstimateSimulator()
+    simulator = simulator or load_simulator_from_environment()
     ranked = rank_pareto_candidates(results)
     selected_candidate = ranked.iloc[0]
     optimized = OptimizedStartupProcedure.from_candidate(selected_candidate)
@@ -858,7 +866,11 @@ def generate_priority_summary_chart(
     bars = axis.bar(labels, [1.0, 1.0], color=colors, alpha=0.9, width=0.7)
     axis.set_ylim(0, 1.5)
     axis.set_yticks([])
-    axis.set_title("BWRX-300 Startup Priority Summary")
+    axis.set_title(
+        "Illustrative Heuristic: BWR Startup Priority Summary"
+        if isinstance(simulator, IllustrativeHeuristicSimulator)
+        else "Configured Simulator Startup Priority Summary"
+    )
     axis.set_ylabel("Winner by priority")
     for bar, winner in zip(bars, winner_names, strict=False):
         x = bar.get_x() + bar.get_width() / 2
@@ -888,10 +900,10 @@ def generate_improvement_report(
     simulator: StartupSimulator | None = None,
     output_path: str | Path = "results/improvement_report.txt",
 ) -> str:
-    """Produce a presentation-ready BWRX-300 startup comparison summary."""
+    """Produce a comparison summary for the configured startup backend."""
     if results.empty:
         raise ValueError("Cannot compare procedures from an empty result set.")
-    simulator = simulator or LiteratureBasedEstimateSimulator()
+    simulator = simulator or load_simulator_from_environment()
     ranked = rank_pareto_candidates(results)
     selected_candidate = ranked.iloc[0]
     optimized = OptimizedStartupProcedure.from_candidate(selected_candidate)
@@ -907,7 +919,7 @@ def generate_improvement_report(
     winners = _priority_winners(profile_metrics)
     baseline_name = "Conservative Startup"
     metric_names = (
-        ("Flashing Margin", "flashing_margin", "higher"),
+        ("Flashing-margin score", "flashing_margin", "higher"),
         ("DWO Index", "density_wave_oscillation_index", "lower"),
         ("Pressure Oscillation Index", "pressure_oscillation_index", "lower"),
         ("Thermal Stress", "thermal_stress", "lower"),
@@ -917,11 +929,11 @@ def generate_improvement_report(
     lines = [
         _provenance_statement(simulator),
         "",
-        "BWRX-300 startup comparison summary",
-        "This comparison evaluates a baseline startup sequence against a Pareto-optimized",
-        "startup strategy for a BWRX-300-style natural-circulation startup envelope.",
-        "The results are literature-informed engineering estimates, not validated reactor",
-        "transient predictions or operating limits.",
+        "BWR startup comparison summary",
+        "This comparison evaluates candidate startup strategies using the configured",
+        "backend. It is not a validated BWRX-300 startup model or operating procedure.",
+        "Built-in heuristic outputs are unvalidated scores, not transient predictions,",
+        "operating limits, or literature-derived correlations.",
         "",
         "Priority-based interpretation",
         f"- Stability-priority winner: {winners[PriorityMode.STABILITY.value]}",
@@ -1002,12 +1014,12 @@ def generate_improvement_report(
             "represents the best overall tradeoff within the modelled startup envelope.",
             "For a stability-focused startup, the conservative profile remains the best fit.",
             "For a time- and cost-driven startup, the aggressive profile is preferred.",
-            "For a balanced BWRX-300 decision case, the optimized profile is the preferred",
-            "overall compromise in this framework.",
+            "For the built-in heuristic only, the optimized profile is the normalized",
+            "score compromise; that label does not establish a physically best procedure.",
             "Startup cost index = lost_generation_index + operator_intervention_index +",
             "thermal_stress_penalty.",
-            "The 0.4 MPa flashing threshold and 0.7 MPa stable two-phase threshold remain",
-            "demonstration-only thresholds for the literature-informed estimate model.",
+            "The 0.4 MPa cutoff and 0.7 MPa bonus are demonstration assumptions, not",
+            "universal thresholds or validated BWRX-300 stability limits.",
             "This comparison does not represent validated reactor startup predictions.",
         ]
     )
@@ -1026,7 +1038,7 @@ def generate_improvement_charts(
     """Create presentation-ready baseline-vs-optimized bar charts."""
     if results.empty:
         raise ValueError("Cannot compare procedures from an empty result set.")
-    simulator = simulator or LiteratureBasedEstimateSimulator()
+    simulator = simulator or load_simulator_from_environment()
     ranked = rank_pareto_candidates(results)
     selected_candidate = ranked.iloc[0]
     optimized = OptimizedStartupProcedure.from_candidate(selected_candidate)
@@ -1041,7 +1053,7 @@ def generate_improvement_charts(
     }
     baseline_name = "Conservative Startup"
     metric_specs = (
-        ("Flashing Margin", "flashing_margin", "higher"),
+        ("Flashing-margin score", "flashing_margin", "higher"),
         ("DWO Index", "density_wave_oscillation_index", "lower"),
         ("Pressure Oscillation Index", "pressure_oscillation_index", "lower"),
         ("Thermal Stress", "thermal_stress", "lower"),
@@ -1083,10 +1095,11 @@ def generate_improvement_charts(
 
 
 def _provenance_statement(simulator: StartupSimulator) -> str:
-    if isinstance(simulator, LiteratureBasedEstimateSimulator):
+    if isinstance(simulator, IllustrativeHeuristicSimulator):
         return (
-            "LITERATURE-BASED ESTIMATES: qualitative trend demonstration only; "
-            "not validated correlations or reactor performance predictions."
+            "UNVALIDATED HEURISTIC SCORES: the equation forms and coefficients "
+            "are project assumptions, not literature-derived correlations or "
+            "BWRX-300 performance predictions."
         )
     return (
         "EXTERNAL SIMULATOR OUTPUTS: validation status depends on the configured "
@@ -1202,10 +1215,18 @@ def generate_sensitivity_report(
 
 
 def load_simulator_from_environment() -> StartupSimulator:
-    """Load an external simulator, or use the labeled estimate model by default."""
+    """Load an external backend; require explicit opt-in for heuristic demos."""
     factory_path = os.environ.get("STARTUP_SIMULATOR")
     if not factory_path:
-        return LiteratureBasedEstimateSimulator()
+        estimate_mode = os.environ.get("STARTUP_ESTIMATE_MODE", "").strip().lower()
+        if estimate_mode == "illustrative":
+            return IllustrativeHeuristicSimulator()
+        raise RuntimeError(
+            "No validated simulator is configured. Set STARTUP_SIMULATOR to an "
+            "external backend factory. To run the unvalidated heuristic demo "
+            "only, explicitly set STARTUP_ESTIMATE_MODE=illustrative; its "
+            "outputs are not research-backed BWRX-300 predictions."
+        )
     if ":" not in factory_path:
         raise ValueError(
             "STARTUP_SIMULATOR must use package.module:create_simulator format."
@@ -1218,25 +1239,57 @@ def load_simulator_from_environment() -> StartupSimulator:
 def main() -> None:
     """Run NSGA-II with the selected simulator and export comparison reports."""
     simulator = load_simulator_from_environment()
+    illustrative = isinstance(simulator, IllustrativeHeuristicSimulator)
+    output_directory = (
+        Path("results/illustrative_heuristic")
+        if illustrative
+        else Path("results")
+    )
+    output_directory.mkdir(parents=True, exist_ok=True)
     results = run_parameter_sweep(simulator)
-    results.to_csv("startup_optimization_results.csv", index=False)
-    create_pareto_plots(results, "results")
+    csv_filename = (
+        "illustrative_startup_optimization_results.csv"
+        if illustrative
+        else "startup_optimization_results.csv"
+    )
+    results.to_csv(output_directory / csv_filename, index=False)
+    create_pareto_plots(results, output_directory)
     report = generate_report(results)
-    Path("results/startup_optimization_report.txt").write_text(
+    (output_directory / "startup_optimization_report.txt").write_text(
         report + "\n",
         encoding="utf-8",
     )
-    improvement_report = generate_improvement_report(results, simulator)
-    generate_improvement_charts(results, simulator, "results/improvements")
-    _, sensitivity_report = generate_sensitivity_report(simulator)
-    priority_summary = generate_priority_summary_chart(results, simulator)
+    improvement_report = generate_improvement_report(
+        results,
+        simulator,
+        output_directory / "improvement_report.txt",
+    )
+    generate_improvement_charts(
+        results,
+        simulator,
+        output_directory / "improvements",
+    )
+    _, sensitivity_report = generate_sensitivity_report(
+        simulator,
+        output_directory / "sensitivity_analysis.txt",
+    )
+    generate_priority_summary_chart(
+        results,
+        simulator,
+        output_directory / "improvements/priority_summary.png",
+    )
     print(f"Recorded {len(results):,} unique simulator evaluations.")
     print(f"Pareto candidates: {int(results['is_pareto'].sum()):,}")
     print(
-        "Saved startup_optimization_results.csv, Pareto plots, improvement charts, "
-        "priority summary, and sensitivity reports under results/."
+        f"Saved {csv_filename}, Pareto plots, comparison charts, and reports "
+        f"under {output_directory}/."
     )
-    print("\nPriority summary chart saved to results/improvements/priority_summary.png")
+    if illustrative:
+        print(
+            "\nWARNING: these are unvalidated heuristic scores for workflow "
+            "demonstration only, not literature-derived correlations or "
+            "BWRX-300 performance predictions."
+        )
     print("\n" + report)
     print("\n" + improvement_report)
     print("\n" + sensitivity_report)

@@ -147,10 +147,12 @@ metric hooks document the additional data expected:
   approved method and consistent scaling; the optimizer does not define a
   plant cost or currency model.
 
-The built-in estimate mode uses 0.4 MPa and 0.7 MPa threshold adjustments as
-explicit illustrative assumptions. The code does not independently verify
-their experimental basis. Backend metrics must document their own definitions,
-units, and validity. Preserve enough time/location metadata to audit peak
+The separate illustrative heuristic mode uses 0.4 MPa and 0.7 MPa adjustments
+as project assumptions. These are not universal experimentally validated
+thresholds or BWRX-300 stability limits. The default optimizer now requires an
+explicit external simulator; see the root README before opting into the
+heuristic demonstration. Backend metrics must document their own definitions,
+units, and validation. Preserve enough time/location metadata to audit peak
 metrics.
 
 ## 6. Future OpenFOAM / GeN-Foam Integration
