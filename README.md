@@ -1,6 +1,9 @@
 # F26 Nuclear Innovation Challenge – Group 16
 
-This repository explores multi-objective optimization of nuclear startup procedures using a Pareto-based search strategy. `startup_optimization.py` supports an explicitly illustrative, literature-informed trend-estimate mode by default, as well as configured external simulation backends.
+This repository explores multi-objective optimization of nuclear startup procedures using a Pareto-based search strategy. `startup_optimization.py` compares and optimizes startup profiles with three
+separate stability metrics: flashing margin, density-wave oscillation index,
+and pressure-oscillation index. It also tracks thermal stress, startup
+duration, and a startup-cost index.
 
 ## Overview
 
@@ -17,9 +20,8 @@ This is research and decision-support tooling, not a plant operating procedure. 
 
 ## Repository layout
 
-- `startup_optimization.py` – optimizer and reporting framework
+- `startup_optimization.py` – BWRX-300 startup optimization and reporting framework
 - `backend/` – solver-specific backend adapters and MOOSE THM integration
-- `burnup_analysis.py` and `burnup_optimization.py` – related analysis workflows
 - `requirements.txt` – Python dependencies
 - `LICENSE` – project license
 
@@ -31,18 +33,20 @@ The optimizer uses the following structure:
 2. Encodes each candidate as a `StartupProcedure`
 3. Sends a JSON-like payload to the configured simulator backend
 4. Validates outputs as `SimulationMetrics`
-5. Minimizes six objective values:
+5. Optimizes six objective values:
    - startup time
-   - flashing instability risk
-   - density-wave oscillation risk
-   - geysering risk
+   - flashing margin (higher is preferred)
+   - density-wave oscillation index
+   - pressure-oscillation index
    - thermal stress
    - startup cost
 6. Runs NSGA-II across many candidate designs
 7. Identifies Pareto-front solutions and ranks them with a normalized score
 8. Writes results to `startup_optimization_results.csv` and under `results/`
 
-The top candidate is a compromise across all objectives, not a single combined instability equation. Risk metrics remain separate and must be interpreted with the backend model's validation and uncertainty treatment.
+The search includes COLD, WARM, and HOT categories with different illustrative
+initial pressure and temperature conditions. The default condition values are
+demonstration placeholders, not BWRX-300 data.
 
 ## Required backend
 
@@ -92,36 +96,66 @@ python startup_optimization.py
 This produces:
 
 - `startup_optimization_results.csv`
-- `results/time_vs_risk.png` and `.html`
+- `results/time_vs_risk.png` (separate axes per stability metric)
 - `results/time_vs_cost.png` and `.html`
-- `results/cost_vs_risk.png` and `.html`
+- `results/cost_vs_risk.png` (separate axes per stability metric)
+- metric-specific interactive HTML plots under `results/`
 - `results/startup_optimization_report.txt`
-- `results/improvements/improvement_summary.txt`
-- four baseline-versus-optimized comparison charts under `results/improvements/`
+- `results/improvement_report.txt`
+- `results/improvements/` with presentation-ready bar charts for baseline vs optimized metrics
+- `results/sensitivity_analysis.txt`
 
-## Baseline comparison and estimate limitations
+## Parameter Selection and Literature Validation
 
-The run compares a baseline procedure (2.5 %FP/min power ramp, 0.8 MPa/min
-pressure ramp, 2.0 MPa boiling initiation pressure, 10 C inlet subcooling, and
-no hold points) against the top-ranked Pareto candidate. The report includes
-the six metric estimates, percent changes, and separate bar charts for flashing
-risk, density-wave oscillation (DWO) risk, geysering risk, and thermal stress.
+This project uses a literature-informed parameter set to bound the startup optimization framework. These values are intentionally separated into:
 
-The built-in factors translate the supplied qualitative literature-informed
-trends into transparent illustrative estimates. They are not numerical
-correlations taken from cited BWRX-300 studies, and their outputs must not be
-presented as predictive reactor simulations. A validated MOOSE THM or
-OpenFOAM/GeN-Foam backend can replace these estimates by setting
-`STARTUP_SIMULATOR`; see [backend setup](backend/README.md).
+- validated literature parameters: pressure thresholds and subcooling levels
+- engineering assumptions: startup ramps, hold points, and scoring functions
 
-The estimate model encodes these directions: faster power ramps increase
-flashing and DWO risk; lower boiling-initiation pressure increases flashing
-risk; additional holds reduce instability indices; higher pressure reduces
-geysering risk; faster pressure ramps increase the thermal-stress index; and
-greater inlet subcooling lowers flashing risk while increasing estimated
-startup time. The numerical sensitivity factors are transparent demonstration
-choices, not values derived from a cited BWRX-300 data set. Startup cost is a
-relative time-based index, not a currency or plant-cost estimate.
+### 1) Pressure range: 0.1 MPa – 0.7 MPa
+
+The search space uses a low-pressure start at approximately 0.1 MPa and a stable two-phase circulation regime at about 0.7 MPa. Stable two-phase circulation was achieved above approximately 0.7 MPa in the startup instability experiments reported by Subki et al. This is a literature-supported lower bound for stable circulation during startup, and it is used as a validation anchor for the pressure range in this repository. See [Subki et al. startup instability experiments][subki-startup].
+
+### 2) Flashing instability threshold: 0.4 MPa
+
+The flashing-instability threshold used in the estimator is 0.4 MPa. This is based on the Purdue BWR-type SMR stability maps, where the flashing-instability boundary approaches the zero-quality boundary near this pressure. This makes 0.4 MPa a useful pressure boundary for identifying the onset of flashing-related instability in a literature-informed startup approximation. See [Purdue BWR-type SMR stability maps][purdue-smr].
+
+### 3) Inlet subcooling: 5 K, 10 K, 15 K
+
+The inlet-subcooling levels used here follow the natural-circulation startup instability experiments. The literature-supported subcooling conditions used for the framework are 5 K, 10 K, and 15 K. These values are used as validated operating points for evaluating stability sensitivity, while the startup ramps and hold schedules remain engineering approximations. See [Natural-circulation startup instability experiments][natural-circulation-startup].
+
+### 4) Startup classifications
+
+The project uses the following startup definitions:
+
+| Startup classification | Initial pressure | Inlet subcooling | Status |
+|---|---:|---:|---|
+| Cold Startup | 0.1 MPa | 15 K | Literature-based startup condition |
+| Warm Startup | 0.7 MPa | 10 K | Literature-based startup condition |
+| Hot Startup | 2.0 MPa | 5 K | Engineering assumption for demonstration only |
+
+The Hot Startup values are explicitly engineering assumptions for the optimization framework and not a validated reactor-specific operating condition. The pressure and subcooling values for Cold and Warm Startup are anchored to the cited literature; the Hot Startup values are a demonstration extension used to compare startup types in the optimization workflow.
+
+## Profile comparison and limitations
+
+The run compares Aggressive, Conservative, and Pareto-optimized profiles, ranks variable importance using a one-at-a-time sensitivity analysis, and applies demonstration adjustments at the 0.4 MPa flashing and 0.7 MPa stable two-phase thresholds. These thresholds are from the literature sources listed above and are used here as validation anchors for the estimate model.
+
+The built-in factors translate qualitative literature-informed trends into transparent illustrative estimates. They are not numerical correlations taken from a validated BWRX-300 reactor model, and their outputs must not be presented as predictive reactor simulations. Startup cost is the sum of illustrative lost-generation, operator-intervention, and thermal-stress-penalty indices; it is not a currency or plant-cost estimate. A validated MOOSE THM or OpenFOAM/GeN-Foam backend can replace these estimates by setting `STARTUP_SIMULATOR`; see [backend setup](backend/README.md).
+
+The comparison is saved to `results/improvement_report.txt`, and the ranked variable importance is saved to `results/sensitivity_analysis.txt`.
+
+### Limitations
+
+Validated literature parameters:
+- pressure thresholds from startup instability experiments and stability maps
+- subcooling levels from natural-circulation startup instability experiments
+
+Engineering assumptions:
+- power and pressure ramp rates
+- hold points and hold durations
+- scoring and normalization functions used to rank startup candidates
+
+This project is a literature-informed startup optimization framework and not a validated reactor simulation. Any real plant application must use approved models, validation data, uncertainty treatment, and operational review before implementation.
 
 ## Outputs and interpretation
 
@@ -130,10 +164,21 @@ relative time-based index, not a currency or plant-cost estimate.
 - a full results table with per-candidate decision metrics
 - a Pareto flag for each candidate
 - a compromise score for ranking candidates
-- plots showing trade-offs between startup time, cost, and risk metrics
-- a text summary report
+- plots showing trade-offs between startup duration, cost, and stability metrics
+- `results/improvement_report.txt` comparing the three startup profiles
+- `results/sensitivity_analysis.txt` with a ranked one-at-a-time importance list
 
 Interpretation should always consider backend validation, data quality, and assumptions behind every metric. Percent improvements are relative to the baseline values; negative startup-time or cost percentages are labeled as worsened performance. The optimizer is decision-support infrastructure, not a validated startup procedure for plant operations.
+
+## References
+
+- [Subki et al. startup instability experiments][subki-startup]
+- [Purdue BWR-type SMR stability maps][purdue-smr]
+- [Natural-circulation startup instability experiments][natural-circulation-startup]
+
+[subki-startup]: Subki, A. et al., startup instability experiments for natural-circulation systems; pressure range and stable two-phase circulation behavior used to bound the pressure search space.
+[purdue-smr]: Purdue University BWR-type small modular reactor stability maps; the flashing-instability boundary near the zero-quality limit used to select the 0.4 MPa threshold.
+[natural-circulation-startup]: Natural-circulation startup instability experiments; inlet-subcooling levels of 5 K, 10 K, and 15 K used to represent validated literature subcooling conditions.
 
 ## Safety note
 

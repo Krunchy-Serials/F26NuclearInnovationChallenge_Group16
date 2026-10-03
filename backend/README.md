@@ -7,7 +7,7 @@ passes the parsed data to explicit metric-extraction hooks.
 
 **This repository does not include a BWRX-300 MOOSE model, validated startup
 procedure, THM correlations, structural model, or fuel-cycle cost model.** The
-five engineering metric extractors intentionally raise `NotImplementedError`.
+engineering metric extractors intentionally raise `NotImplementedError`.
 Do not use optimizer output as a plant procedure. Implement and validate the
 metric hooks with the applicable model, data, uncertainty treatment, and review
 before running a study.
@@ -73,7 +73,8 @@ For each NSGA-II candidate, the adapter:
 5. Saves stdout/stderr, checks the process exit status, and parses the configured
    transient CSV.
 6. Extracts startup time from the configured power-threshold crossing.
-7. Calls metric hooks for flashing, DWO, geysering, thermal stress, and cost.
+7. Calls hooks for flashing margin, DWO index, pressure-oscillation index,
+   thermal stress, and the three startup-cost components.
 8. Returns a mapping that the existing `MOOSETHMAdapter` validates as
    `SimulationMetrics`.
 
@@ -90,6 +91,9 @@ all of these exact tokens:
 - `{{PRESSURE_RAMP_RATE}}`
 - `{{BOILING_INITIATION_PRESSURE}}`
 - `{{INLET_SUBCOOLING}}`
+- `{{STARTUP_TYPE}}`
+- `{{INITIAL_PRESSURE_MPA}}`
+- `{{INITIAL_TEMPERATURE_C}}`
 - `{{HOLD_COUNT}}`
 - `{{HOLD_DURATION}}`
 - `{{HOLD_SCHEDULE_JSON}}`
@@ -99,9 +103,12 @@ all of these exact tokens:
 The renderer also provides `{{HOLD_1_POWER}}`, `{{HOLD_1_DURATION}}` through
 `{{HOLD_3_POWER}}`, and `{{HOLD_3_DURATION}}`. The optimizer currently assigns
 one duration to all points in a hold schedule. Missing holds are set to zero.
-The hold schedule is serialized as JSON in the run folder. The template must
-consume the tokens using syntax and controls implemented by your own MOOSE model;
-this package cannot make a generic THM deck physically complete.
+The hold schedule is serialized as JSON in the run folder. The selected `COLD`,
+`WARM`, or `HOT` startup type and its initial pressure/temperature are also
+passed to the deck. These type conditions are illustrative placeholders, not
+BWRX-300 data. The template must consume the tokens using syntax and controls
+implemented by your own MOOSE model; this package cannot make a generic THM
+deck physically complete.
 
 A template must already define the reactor/network geometry, components,
 materials, closures, boundary and initial conditions, power/pressure controls,
@@ -126,29 +133,34 @@ threshold, the run is rejected.
 At minimum, provide time and power histories for startup-time extraction. The
 metric hooks document the additional data expected:
 
-- **Flashing:** local pressure, fluid temperature or enthalpy, vapor quality or
-  void fraction, and mass flow.
-- **Density wave oscillation:** adequately sampled pressure-drop, mass-flow,
-  void/quality, and power histories for a validated stability or signal-analysis
-  method.
-- **Geysering:** pressure, fluid/wall temperature or subcooling, void/quality,
-  and mass-flow histories.
+- **Flashing margin:** local pressure, fluid temperature or enthalpy, vapor
+  quality or void fraction, and mass flow, with a documented sign and units.
+- **Density-wave oscillation index:** adequately sampled pressure-drop,
+  mass-flow, void/quality, and power histories for a validated method.
+- **Pressure-oscillation index:** pressure histories and documented signal
+  processing, sampling, and units.
 - **Thermal stress:** preferably coupled structural-solver stress output. THM
   temperatures and pressures alone need geometry, constraints, and material
   properties before stress can be established.
-- **Startup cost:** an approved cost method plus measured duration and explicit
-  staffing, lost-generation, price, and currency assumptions.
+- **Startup cost:** the sum of lost-generation index,
+  operator-intervention index, and thermal-stress penalty. Each term needs an
+  approved method and consistent scaling; the optimizer does not define a
+  plant cost or currency model.
 
-Risk outputs must be justified and normalized to the 0-100 scale required by
-`SimulationMetrics`. Thermal stress and cost must use consistent units across
-candidates. Preserve enough time/location metadata to audit peak metrics.
+The built-in estimate mode uses 0.4 MPa and 0.7 MPa threshold adjustments as
+explicit illustrative assumptions. The code does not independently verify
+their experimental basis. Backend metrics must document their own definitions,
+units, and validity. Preserve enough time/location metadata to audit peak
+metrics.
 
 ## 6. Future OpenFOAM / GeN-Foam Integration
 
 Implement a runner with the same callable shape as `MOOSETHMAdapter`: accept the
 serialized procedure, generate a solver-specific case from a validated template,
 execute OpenFOAM/GeN-Foam, parse its time directories and fields, and return the
-six metric names. Wire it to the existing `OpenFOAMGeNFoamAdapter`; leave
+new metric contract (`flashing_margin`, `density_wave_oscillation_index`,
+`pressure_oscillation_index`, `thermal_stress`, plus the three startup-cost
+components). Wire it to the existing `OpenFOAMGeNFoamAdapter`; leave
 `startup_optimization.py` unchanged. Keep solver-specific mesh, boundary,
 closure, convergence, and unit checks inside that backend.
 

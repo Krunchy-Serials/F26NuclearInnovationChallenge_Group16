@@ -1,25 +1,28 @@
 Recommended Pareto Compromise
-Power ramp rate: 2.031 %FP/min
-Pressure ramp rate: 0.117 MPa/min
-Boiling initiation pressure: 6.766 MPa
-Inlet subcooling: 9.50 C
-Hold point schedule: [{'power_percent': 25, 'duration_minutes': 7.665324836870114}, {'power_percent': 50, 'duration_minutes': 7.665324836870114}, {'power_percent': 75, 'duration_minutes': 7.665324836870114}]
-Startup time: 98.20 minutes
-Flashing risk: 10.94/100
-Density-wave risk: 27.16/100
-Geysering risk: 19.48/100
-Thermal stress: 36.348
-Startup cost: 98947.180
-Decision-support score: 0.8169
+Power ramp rate: 1.869 %FP/min
+Pressure ramp rate: 0.184 MPa/min
+Boiling initiation pressure: 6.925 MPa
+Inlet subcooling: 41.82 C
+Startup type: HOT
+Initial pressure: 2.000 MPa
+Initial temperature: 200.0 C
+Hold point schedule: [{'power_percent': 25, 'duration_minutes': 55.312328120248324}, {'power_percent': 50, 'duration_minutes': 55.312328120248324}, {'power_percent': 75, 'duration_minutes': 55.312328120248324}]
+Startup time: 257.24 minutes
+Flashing margin: 7.055 MPa-equivalent estimate
+DWO index: 18.394
+Pressure oscillation index: 31.075
+Thermal stress: 37.672
+Startup cost: 162.386
+Decision-support score: 0.7139
 
 Top Pareto Candidates
-1. score=0.8169, time=98.20 min, cost=98947.180, risks=(flashing 10.94, DWO 27.16, geysering 19.48)
-2. score=0.8124, time=195.30 min, cost=196052.911, risks=(flashing 0.00, DWO 17.29, geysering 17.06)
-3. score=0.8062, time=146.28 min, cost=147031.627, risks=(flashing 7.42, DWO 26.45, geysering 17.46)
-4. score=0.7841, time=155.99 min, cost=156735.570, risks=(flashing 0.00, DWO 18.42, geysering 20.12)
-5. score=0.7679, time=139.21 min, cost=139960.562, risks=(flashing 4.52, DWO 24.05, geysering 20.17)
+1. score=0.7139, time=257.24 min, cost=162.386, stability=(margin 7.055, DWO 18.394, pressure oscillation 31.075)
+2. score=0.7052, time=154.65 min, cost=110.986, stability=(margin 4.460, DWO 32.530, pressure oscillation 27.678)
+3. score=0.6842, time=221.62 min, cost=144.881, stability=(margin 6.676, DWO 14.930, pressure oscillation 37.281)
+4. score=0.6807, time=55.50 min, cost=31.613, stability=(margin 5.616, DWO 47.771, pressure oscillation 40.650)
+5. score=0.6765, time=92.62 min, cost=59.943, stability=(margin 2.437, DWO 41.946, pressure oscillation 29.646)
 
-The selected candidate is a normalized compromise across the six backend outputs. Risk types remain separate; this optimizer adds no combined instability equation.
+The selected candidate is a normalized compromise across the six backend outputs. Flashing margin, DWO index, and pressure oscillation index remain separate metrics.
 
 This recommendation depends on the configured backend or estimate model and its assumptions. It is not a plant operating procedure.
 When the built-in estimate model is active, these are illustrative literature-informed estimates, not predictive reactor simulations.

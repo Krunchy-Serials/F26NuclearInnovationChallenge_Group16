@@ -14,6 +14,9 @@ REQUIRED_TEMPLATE_TOKENS = (
     "PRESSURE_RAMP_RATE",
     "BOILING_INITIATION_PRESSURE",
     "INLET_SUBCOOLING",
+    "STARTUP_TYPE",
+    "INITIAL_PRESSURE_MPA",
+    "INITIAL_TEMPERATURE_C",
     "HOLD_COUNT",
     "HOLD_DURATION",
     "HOLD_SCHEDULE_JSON",
@@ -44,13 +47,21 @@ def procedure_template_values(
     ranges = {
         "POWER_RAMP_RATE": (0.5, 3.0),
         "PRESSURE_RAMP_RATE": (0.1, 1.0),
-        "BOILING_INITIATION_PRESSURE": (1.0, 7.0),
+        "BOILING_INITIATION_PRESSURE": (0.1, 7.0),
         "INLET_SUBCOOLING": (5.0, 50.0),
     }
     for name, value in scalar_inputs.items():
         lower, upper = ranges[name]
         if not math.isfinite(value) or not lower <= value <= upper:
             raise ValueError(f"{name} must be between {lower} and {upper}.")
+    initial_pressure = float(procedure.initial_conditions.pressure_mpa)
+    initial_temperature = float(procedure.initial_conditions.temperature_c)
+    if (
+        not math.isfinite(initial_pressure)
+        or initial_pressure < 0.0
+        or not math.isfinite(initial_temperature)
+    ):
+        raise ValueError("Startup type initial conditions must be finite and valid.")
 
     if Path(output_csv_name).name != output_csv_name:
         raise ValueError("output_csv_name must be a filename, not a path.")
@@ -83,6 +94,9 @@ def procedure_template_values(
     }
     values.update(
         {
+            "STARTUP_TYPE": procedure.startup_type.value,
+            "INITIAL_PRESSURE_MPA": f"{initial_pressure:.12g}",
+            "INITIAL_TEMPERATURE_C": f"{initial_temperature:.12g}",
             "HOLD_COUNT": str(len(hold_rows)),
             "HOLD_DURATION": f"{hold_duration:.12g}",
             "HOLD_SCHEDULE_JSON": json.dumps(hold_rows, separators=(",", ":")),

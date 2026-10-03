@@ -13,7 +13,8 @@ import json
 import math
 import os
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -27,19 +28,52 @@ from pymoo.optimize import minimize
 
 
 DEFAULT_HOLD_SCHEDULES = ((), (25,), (25, 50), (25, 50, 75))
+FLASHING_THRESHOLD_PRESSURE_MPA = 0.4
+STABLE_TWO_PHASE_PRESSURE_MPA = 0.7
 OBJECTIVES = (
     "startup_time_minutes",
-    "flashing_instability_risk",
-    "density_wave_oscillation_risk",
-    "geysering_risk",
+    "flashing_margin",
+    "density_wave_oscillation_index",
+    "pressure_oscillation_index",
     "thermal_stress",
     "startup_cost",
 )
+MAXIMIZE_OBJECTIVES = frozenset({"flashing_margin"})
 MetricRunner = Callable[[dict[str, Any]], Mapping[str, Any]]
-RISK_COLUMNS = {
-    "Flashing": "flashing_instability_risk",
-    "Density wave oscillation": "density_wave_oscillation_risk",
-    "Geysering": "geysering_risk",
+STABILITY_COLUMNS = {
+    "Flashing margin": "flashing_margin",
+    "Density-wave oscillation index": "density_wave_oscillation_index",
+    "Pressure oscillation index": "pressure_oscillation_index",
+}
+
+
+class StartupType(str, Enum):
+    """Startup category with illustrative initial pressure and temperature."""
+
+    COLD = "COLD"
+    WARM = "WARM"
+    HOT = "HOT"
+
+
+class PriorityMode(str, Enum):
+    """Explicit decision modes used to rank startup profiles."""
+
+    STABILITY = "stability-priority"
+    SPEED = "speed-priority"
+    COST = "cost-priority"
+
+
+@dataclass(frozen=True)
+class InitialConditions:
+    pressure_mpa: float
+    temperature_c: float
+
+
+# Illustrative values for demo comparisons only; they are not BWRX-300 limits.
+STARTUP_INITIAL_CONDITIONS = {
+    StartupType.COLD: InitialConditions(pressure_mpa=0.1, temperature_c=20.0),
+    StartupType.WARM: InitialConditions(pressure_mpa=0.7, temperature_c=120.0),
+    StartupType.HOT: InitialConditions(pressure_mpa=2.0, temperature_c=200.0),
 }
 
 
@@ -60,15 +94,24 @@ class StartupProcedure:
     boiling_initiation_pressure: float
     inlet_subcooling: float
     hold_schedule: tuple[HoldPoint, ...]
+    startup_type: StartupType = StartupType.COLD
+
+    @property
+    def initial_conditions(self) -> InitialConditions:
+        return STARTUP_INITIAL_CONDITIONS[self.startup_type]
 
     def to_payload(self) -> dict[str, Any]:
         """Return a JSON-friendly payload for external simulation drivers."""
+        initial_conditions = self.initial_conditions
         return {
             "power_ramp_rate": self.power_ramp_rate,
             "pressure_ramp_rate": self.pressure_ramp_rate,
             "boiling_initiation_pressure": self.boiling_initiation_pressure,
             "inlet_subcooling": self.inlet_subcooling,
             "hold_schedule": [asdict(point) for point in self.hold_schedule],
+            "startup_type": self.startup_type.value,
+            "initial_pressure_mpa": initial_conditions.pressure_mpa,
+            "initial_temperature_c": initial_conditions.temperature_c,
         }
 
 
@@ -107,6 +150,7 @@ class OptimizedStartupProcedure(StartupProcedure):
                 )
                 for point in schedule_data
             ),
+            startup_type=StartupType(candidate.get("startup_type", "COLD")),
         )
 
 
@@ -114,38 +158,69 @@ class OptimizedStartupProcedure(StartupProcedure):
 class SimulationMetrics:
     """Metrics supplied by simulator post-processing, not calculated here.
 
-    Risk values must already be expressed on a backend-defined 0-100 scale.
-    Thermal stress and startup cost must use consistent units across candidates.
+    The estimate model uses higher flashing margin as better and minimizes the
+    two indices and remaining objectives. Units and definitions for simulator
+    outputs must be supplied by each backend.
     """
 
     startup_time_minutes: float
-    flashing_instability_risk: float
-    density_wave_oscillation_risk: float
-    geysering_risk: float
+    flashing_margin: float
+    density_wave_oscillation_index: float
+    pressure_oscillation_index: float
     thermal_stress: float
     startup_cost: float
+    lost_generation_index: float = 0.0
+    operator_intervention_index: float = 0.0
+    thermal_stress_penalty: float = 0.0
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> SimulationMetrics:
         """Validate the required simulator output contract."""
+        component_names = (
+            "lost_generation_index",
+            "operator_intervention_index",
+            "thermal_stress_penalty",
+        )
+        supplied_components = [name in values for name in component_names]
+        if any(supplied_components) and not all(supplied_components):
+            raise ValueError(
+                "Simulator output must provide all startup-cost components or none."
+            )
         missing = set(OBJECTIVES).difference(values)
+        if all(supplied_components):
+            missing.discard("startup_cost")
         if missing:
             raise ValueError(f"Simulator output is missing metrics: {sorted(missing)}")
 
-        metrics = cls(**{name: float(values[name]) for name in OBJECTIVES})
+        fields = {
+            name: float(values[name])
+            for name in OBJECTIVES
+            if name in values
+        }
+        if all(supplied_components):
+            components = {
+                name: float(values[name]) for name in component_names
+            }
+            fields.update(components)
+            fields["startup_cost"] = sum(components.values())
+        metrics = cls(**fields)
         for name, value in asdict(metrics).items():
-            if not math.isfinite(value) or value < 0.0:
+            if not math.isfinite(value) or (
+                value < 0.0 and name not in MAXIMIZE_OBJECTIVES
+            ):
                 raise ValueError(
                     f"Simulator metric {name} must be finite and nonnegative."
                 )
-        for name in OBJECTIVES[1:4]:
-            if getattr(metrics, name) > 100.0:
-                raise ValueError(f"Simulator risk {name} must use a 0-100 scale.")
         return metrics
 
     def objective_vector(self) -> list[float]:
-        """Return minimized objectives in the optimizer's declared order."""
-        return [float(getattr(self, name)) for name in OBJECTIVES]
+        """Return objectives in the optimizer's all-minimization form."""
+        return [
+            -float(getattr(self, name))
+            if name in MAXIMIZE_OBJECTIVES
+            else float(getattr(self, name))
+            for name in OBJECTIVES
+        ]
 
 
 class StartupSimulator(Protocol):
@@ -170,43 +245,51 @@ class LiteratureBasedEstimateSimulator:
             point.duration_minutes for point in procedure.hold_schedule
         )
         # Demonstration sensitivities are intentionally transparent and bounded.
+        initial = procedure.initial_conditions
         startup_time = (
             150.0 / procedure.power_ramp_rate
             + (procedure.inlet_subcooling - 5.0) * 0.3
             + hold_minutes
+            + max(0.0, 200.0 - initial.temperature_c) * 0.2
         )
-        # Boiling initiation pressure is only a demonstration proxy for pressure.
-        flashing_risk = (
-            50.0
-            + (procedure.power_ramp_rate - 2.5) * 10.0
-            + (2.0 - procedure.boiling_initiation_pressure) * 5.0
-            - (procedure.inlet_subcooling - 10.0) * 0.6
-            - hold_count * 3.0
-            - hold_minutes * 0.08
+        # These threshold adjustments are illustrative, not validated criteria.
+        flashing_pressure = procedure.boiling_initiation_pressure
+        flashing_margin = (
+            flashing_pressure - FLASHING_THRESHOLD_PRESSURE_MPA
+            + (0.1 if flashing_pressure >= STABLE_TWO_PHASE_PRESSURE_MPA else 0.0)
+            - (0.2 if flashing_pressure < FLASHING_THRESHOLD_PRESSURE_MPA else 0.0)
+            + (initial.pressure_mpa - 0.1) * 0.02
+            - (procedure.power_ramp_rate - 0.5) * 0.04
+            + (procedure.inlet_subcooling - 5.0) * 0.006
+            + hold_count * 0.02
+            + hold_minutes * 0.001
         )
-        dwo_risk = (
+        density_wave_index = (
             45.0
             + (procedure.power_ramp_rate - 2.5) * 10.0
-            - hold_count * 4.0
-            - hold_minutes * 0.05
+            - hold_count * 4.0 - hold_minutes * 0.05
         )
-        geysering_risk = (
-            50.0
-            + (2.0 - procedure.boiling_initiation_pressure) * 5.0
+        pressure_oscillation_index = (
+            30.0
+            + procedure.pressure_ramp_rate * 12.0
+            + abs(procedure.boiling_initiation_pressure - initial.pressure_mpa) * 2.0
             - hold_count * 2.0
             - hold_minutes * 0.03
         )
         thermal_stress = 50.0 + (procedure.pressure_ramp_rate - 0.8) * 20.0
-        # A relative cost index only; no currency or plant-cost model is implied.
-        startup_cost = startup_time * 1_000.0 + hold_count * 250.0
+        lost_generation_index = startup_time * 0.5
+        operator_intervention_index = hold_count * 10.0
+        thermal_stress_penalty = thermal_stress * 0.1
         return SimulationMetrics.from_mapping(
             {
                 "startup_time_minutes": startup_time,
-                "flashing_instability_risk": min(100.0, max(0.0, flashing_risk)),
-                "density_wave_oscillation_risk": min(100.0, max(0.0, dwo_risk)),
-                "geysering_risk": min(100.0, max(0.0, geysering_risk)),
+                "flashing_margin": flashing_margin,
+                "density_wave_oscillation_index": max(0.0, density_wave_index),
+                "pressure_oscillation_index": max(0.0, pressure_oscillation_index),
                 "thermal_stress": max(0.0, thermal_stress),
-                "startup_cost": startup_cost,
+                "lost_generation_index": lost_generation_index,
+                "operator_intervention_index": operator_intervention_index,
+                "thermal_stress_penalty": thermal_stress_penalty,
             }
         )
 
@@ -283,17 +366,21 @@ class SearchSpace:
 
     power_ramp_bounds: tuple[float, float] = (0.5, 3.0)
     pressure_ramp_bounds: tuple[float, float] = (0.1, 1.0)
-    boiling_pressure_bounds: tuple[float, float] = (1.0, 7.0)
+    boiling_pressure_bounds: tuple[float, float] = (0.1, 7.0)
     inlet_subcooling_bounds: tuple[float, float] = (5.0, 50.0)
     hold_duration_bounds: tuple[float, float] = (0.0, 60.0)
     hold_schedules: tuple[tuple[int, ...], ...] = DEFAULT_HOLD_SCHEDULES
+    startup_types: tuple[StartupType, ...] = tuple(StartupType)
 
     def decode(self, vector: np.ndarray) -> StartupProcedure:
         """Convert a search vector into settings and a discrete hold schedule."""
-        schedule_index = int(
-            np.clip(np.rint(vector[4]), 0, len(self.hold_schedules) - 1)
+        startup_type_index = int(
+            np.clip(np.rint(vector[4]), 0, len(self.startup_types) - 1)
         )
-        duration = float(vector[5])
+        schedule_index = int(
+            np.clip(np.rint(vector[5]), 0, len(self.hold_schedules) - 1)
+        )
+        duration = float(vector[6])
         schedule = tuple(
             HoldPoint(level, duration)
             for level in self.hold_schedules[schedule_index]
@@ -305,6 +392,7 @@ class SearchSpace:
             pressure_ramp_rate=float(vector[1]),
             boiling_initiation_pressure=float(vector[2]),
             inlet_subcooling=float(vector[3]),
+            startup_type=self.startup_types[startup_type_index],
             hold_schedule=tuple(
                 HoldPoint(point.power_percent, duration) for point in schedule
             ),
@@ -319,6 +407,7 @@ class SearchSpace:
                 self.boiling_pressure_bounds[0],
                 self.inlet_subcooling_bounds[0],
                 0.0,
+                0.0,
                 self.hold_duration_bounds[0],
             ]
         )
@@ -328,6 +417,7 @@ class SearchSpace:
                 self.pressure_ramp_bounds[1],
                 self.boiling_pressure_bounds[1],
                 self.inlet_subcooling_bounds[1],
+                float(len(self.startup_types) - 1),
                 float(len(self.hold_schedules) - 1),
                 self.hold_duration_bounds[1],
             ]
@@ -340,7 +430,7 @@ class _StartupProblem(ElementwiseProblem):
 
     def __init__(self, simulator: StartupSimulator, search_space: SearchSpace) -> None:
         lower, upper = search_space.bounds()
-        super().__init__(n_var=6, n_obj=len(OBJECTIVES), xl=lower, xu=upper)
+        super().__init__(n_var=7, n_obj=len(OBJECTIVES), xl=lower, xu=upper)
         self.simulator = simulator
         self.search_space = search_space
         self.records: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -352,6 +442,7 @@ class _StartupProblem(ElementwiseProblem):
             round(procedure.pressure_ramp_rate, 8),
             round(procedure.boiling_initiation_pressure, 8),
             round(procedure.inlet_subcooling, 8),
+            procedure.startup_type.value,
             tuple(
                 (point.power_percent, round(point.duration_minutes, 8))
                 for point in procedure.hold_schedule
@@ -375,7 +466,8 @@ class _StartupProblem(ElementwiseProblem):
                 "_decision_key": key,
                 "candidate_id": len(self.records),
             }
-        out["F"] = [float(self.records[key][name]) for name in OBJECTIVES]
+        metrics = SimulationMetrics.from_mapping(self.records[key])
+        out["F"] = metrics.objective_vector()
 
 
 def _normalize_objectives(values: pd.DataFrame) -> pd.DataFrame:
@@ -383,9 +475,12 @@ def _normalize_objectives(values: pd.DataFrame) -> pd.DataFrame:
     normalized = pd.DataFrame(index=values.index)
     for name in OBJECTIVES:
         span = values[name].max() - values[name].min()
-        normalized[name] = (
-            0.0 if span == 0.0 else (values[name] - values[name].min()) / span
-        )
+        if span == 0.0:
+            normalized[name] = 0.0
+        elif name in MAXIMIZE_OBJECTIVES:
+            normalized[name] = (values[name].max() - values[name]) / span
+        else:
+            normalized[name] = (values[name] - values[name].min()) / span
     return normalized
 
 
@@ -464,7 +559,7 @@ def run_parameter_sweep(
 
 
 def find_best_procedure(results: pd.DataFrame) -> dict[str, pd.Series]:
-    """Return compromise, fastest, lowest-cost, and per-risk best procedures."""
+    """Return compromise and single-objective best candidates."""
     if results.empty:
         raise ValueError("Cannot choose a procedure from an empty result set.")
     ranked = rank_pareto_candidates(results)
@@ -472,24 +567,48 @@ def find_best_procedure(results: pd.DataFrame) -> dict[str, pd.Series]:
         "overall": ranked.iloc[0],
         "fastest": results.loc[results["startup_time_minutes"].idxmin()],
         "lowest_cost": results.loc[results["startup_cost"].idxmin()],
-        "lowest_flashing_risk": results.loc[
-            results["flashing_instability_risk"].idxmin()
+        "highest_flashing_margin": results.loc[
+            results["flashing_margin"].idxmax()
         ],
-        "lowest_dwo_risk": results.loc[
-            results["density_wave_oscillation_risk"].idxmin()
+        "lowest_dwo_index": results.loc[
+            results["density_wave_oscillation_index"].idxmin()
         ],
-        "lowest_geysering_risk": results.loc[results["geysering_risk"].idxmin()],
+        "lowest_pressure_oscillation_index": results.loc[
+            results["pressure_oscillation_index"].idxmin()
+        ],
     }
 
 
-def _risk_long_form(results: pd.DataFrame) -> pd.DataFrame:
-    """Expand independent risk outputs without combining their values."""
-    return pd.concat(
-        [
-            results.assign(risk_type=label, instability_risk=results[column])
-            for label, column in RISK_COLUMNS.items()
-        ],
-        ignore_index=True,
+@dataclass(frozen=True)
+class StartupProfile:
+    name: str
+    procedure: StartupProcedure
+
+
+def comparison_startup_profiles(
+    optimized: OptimizedStartupProcedure,
+) -> tuple[StartupProfile, StartupProfile, StartupProfile]:
+    """Return the named profile comparison set."""
+    aggressive = StartupProcedure(
+        power_ramp_rate=3.0,
+        pressure_ramp_rate=1.0,
+        boiling_initiation_pressure=0.4,
+        inlet_subcooling=5.0,
+        hold_schedule=(),
+        startup_type=StartupType.HOT,
+    )
+    conservative = StartupProcedure(
+        power_ramp_rate=0.5,
+        pressure_ramp_rate=0.1,
+        boiling_initiation_pressure=2.0,
+        inlet_subcooling=35.0,
+        hold_schedule=tuple(HoldPoint(level, 20.0) for level in (25, 50, 75)),
+        startup_type=StartupType.COLD,
+    )
+    return (
+        StartupProfile("Aggressive Startup", aggressive),
+        StartupProfile("Conservative Startup", conservative),
+        StartupProfile("Optimized Startup", optimized),
     )
 
 
@@ -503,34 +622,35 @@ def create_pareto_plots(
     pareto = results.loc[results["is_pareto"]].copy()
     if pareto.empty:
         pareto = results.copy()
-    risks = _risk_long_form(results)
-    risk_front = _risk_long_form(pareto)
+    metric_specs = (
+        ("Flashing Margin", "flashing_margin", "MPa-equivalent estimate"),
+        ("DWO Index", "density_wave_oscillation_index", "Index (backend-defined)"),
+        (
+            "Pressure Oscillation Index",
+            "pressure_oscillation_index",
+            "Index (backend-defined)",
+        ),
+    )
     figures: dict[str, plt.Figure] = {}
 
-    figure, axis = plt.subplots()
-    for name, group in risks.groupby("risk_type", sort=False):
+    figure, axes = plt.subplots(1, 3, figsize=(15, 4), squeeze=False)
+    for axis, (label, column, ylabel) in zip(axes[0], metric_specs):
         axis.scatter(
-            group["startup_time_minutes"],
-            group["instability_risk"],
+            results["startup_time_minutes"],
+            results[column],
             s=18,
             alpha=0.2,
-            label=f"{name} (evaluated)",
+            label="Evaluated",
         )
-    for name, group in risk_front.groupby("risk_type", sort=False):
         axis.scatter(
-            group["startup_time_minutes"],
-            group["instability_risk"],
+            pareto["startup_time_minutes"],
+            pareto[column],
             s=36,
-            alpha=0.9,
-            label=f"{name} (Pareto)",
+            label="Pareto",
         )
-    axis.set(
-        title="Startup Time vs Instability Risks",
-        xlabel="Startup time (min)",
-        ylabel="Backend risk output (0-100)",
-    )
-    axis.grid(True, alpha=0.25)
-    axis.legend(fontsize="small")
+        axis.set(title=label, xlabel="Startup time (min)", ylabel=ylabel)
+        axis.grid(True, alpha=0.25)
+        axis.legend(fontsize="small")
     figures["time_vs_risk"] = figure
 
     figure, axis = plt.subplots()
@@ -555,37 +675,44 @@ def create_pareto_plots(
     axis.legend()
     figures["time_vs_cost"] = figure
 
-    figure, axis = plt.subplots()
-    for name, group in risks.groupby("risk_type", sort=False):
+    figure, axes = plt.subplots(1, 3, figsize=(15, 4), squeeze=False)
+    for axis, (label, column, ylabel) in zip(axes[0], metric_specs):
         axis.scatter(
-            group["startup_cost"],
-            group["instability_risk"],
+            results["startup_cost"],
+            results[column],
             s=18,
             alpha=0.2,
-            label=name,
+            label="Evaluated",
         )
-    axis.set(
-        title="Cost vs Instability Risks",
-        xlabel="Backend startup cost",
-        ylabel="Backend risk output (0-100)",
-    )
-    axis.grid(True, alpha=0.25)
-    axis.legend()
+        axis.scatter(
+            pareto["startup_cost"],
+            pareto[column],
+            s=36,
+            label="Pareto",
+        )
+        axis.set(title=label, xlabel="Startup cost index", ylabel=ylabel)
+        axis.grid(True, alpha=0.25)
+        axis.legend(fontsize="small")
     figures["cost_vs_risk"] = figure
 
     for name, plot in figures.items():
         plot.tight_layout()
         plot.savefig(output_path / f"{name}.png", dpi=160)
 
-    px.scatter(
-        risks,
-        x="startup_time_minutes",
-        y="instability_risk",
-        color="risk_type",
-        symbol="is_pareto",
-        hover_data=["startup_cost", "thermal_stress", "power_ramp_rate"],
-        title="Startup Time vs Backend Instability Outputs",
-    ).write_html(output_path / "time_vs_risk.html")
+    time_metric_files = []
+    cost_metric_files = []
+    for label, column, _ in metric_specs:
+        metric_slug = column.removesuffix("_index").replace("_", "-")
+        time_filename = f"time_vs_{metric_slug}.html"
+        px.scatter(
+            results,
+            x="startup_time_minutes",
+            y=column,
+            color="is_pareto",
+            hover_data=["startup_cost", "thermal_stress", "power_ramp_rate"],
+            title=f"Startup Duration vs {label}",
+        ).write_html(output_path / time_filename)
+        time_metric_files.append((label, time_filename))
     px.scatter(
         results,
         x="startup_time_minutes",
@@ -593,19 +720,36 @@ def create_pareto_plots(
         color="is_pareto",
         title="Startup Time vs Cost",
     ).write_html(output_path / "time_vs_cost.html")
-    px.scatter(
-        risks,
-        x="startup_cost",
-        y="instability_risk",
-        color="risk_type",
-        symbol="is_pareto",
-        title="Cost vs Backend Instability Outputs",
-    ).write_html(output_path / "cost_vs_risk.html")
+    for label, column, _ in metric_specs:
+        metric_slug = column.removesuffix("_index").replace("_", "-")
+        px.scatter(
+            results,
+            x="startup_cost",
+            y=column,
+            color="is_pareto",
+            title=f"Startup Cost vs {label}",
+        ).write_html(output_path / f"cost_vs_{metric_slug}.html")
+        cost_metric_files.append((label, f"cost_vs_{metric_slug}.html"))
+    for filename, title, metric_files in (
+        ("time_vs_risk.html", "Startup Duration vs Stability Metrics", time_metric_files),
+        ("cost_vs_risk.html", "Startup Cost vs Stability Metrics", cost_metric_files),
+    ):
+        panels = "".join(
+            f'<section><h2>{label}</h2><iframe src="{metric_filename}" '
+            'width="100%" height="450" loading="lazy"></iframe></section>'
+            for label, metric_filename in metric_files
+        )
+        (output_path / filename).write_text(
+            "<!doctype html><html><head><meta charset=\"utf-8\">"
+            f"<title>{title}</title></head><body><h1>{title}</h1>{panels}"
+            "</body></html>\n",
+            encoding="utf-8",
+        )
     return figures
 
 
 def generate_report(results: pd.DataFrame) -> str:
-    """Summarize the Pareto compromise and preserve each risk metric separately."""
+    """Summarize the Pareto compromise and its distinct stability metrics."""
     ranked = rank_pareto_candidates(results)
     best = ranked.iloc[0]
     hold_schedule = json.loads(best["hold_schedule"])
@@ -615,11 +759,14 @@ def generate_report(results: pd.DataFrame) -> str:
         f"Pressure ramp rate: {best['pressure_ramp_rate']:.3f} MPa/min",
         f"Boiling initiation pressure: {best['boiling_initiation_pressure']:.3f} MPa",
         f"Inlet subcooling: {best['inlet_subcooling']:.2f} C",
+        f"Startup type: {best['startup_type']}",
+        f"Initial pressure: {best['initial_pressure_mpa']:.3f} MPa",
+        f"Initial temperature: {best['initial_temperature_c']:.1f} C",
         f"Hold point schedule: {hold_schedule}",
         f"Startup time: {best['startup_time_minutes']:.2f} minutes",
-        f"Flashing risk: {best['flashing_instability_risk']:.2f}/100",
-        f"Density-wave risk: {best['density_wave_oscillation_risk']:.2f}/100",
-        f"Geysering risk: {best['geysering_risk']:.2f}/100",
+        f"Flashing margin: {best['flashing_margin']:.3f} MPa-equivalent estimate",
+        f"DWO index: {best['density_wave_oscillation_index']:.3f}",
+        f"Pressure oscillation index: {best['pressure_oscillation_index']:.3f}",
         f"Thermal stress: {best['thermal_stress']:.3f}",
         f"Startup cost: {best['startup_cost']:.3f}",
         f"Decision-support score: {best['decision_support_score']:.4f}",
@@ -631,16 +778,16 @@ def generate_report(results: pd.DataFrame) -> str:
             f"{rank}. score={candidate['decision_support_score']:.4f}, "
             f"time={candidate['startup_time_minutes']:.2f} min, "
             f"cost={candidate['startup_cost']:.3f}, "
-            f"risks=(flashing {candidate['flashing_instability_risk']:.2f}, "
-            f"DWO {candidate['density_wave_oscillation_risk']:.2f}, "
-            f"geysering {candidate['geysering_risk']:.2f})"
+            f"stability=(margin {candidate['flashing_margin']:.3f}, "
+            f"DWO {candidate['density_wave_oscillation_index']:.3f}, "
+            f"pressure oscillation {candidate['pressure_oscillation_index']:.3f})"
         )
     lines.extend(
         [
             "",
         "The selected candidate is a normalized compromise across the six backend "
-        "outputs. Risk types remain separate; this optimizer adds no combined "
-        "instability equation.",
+        "outputs. Flashing margin, DWO index, and pressure oscillation index "
+        "remain separate metrics.",
         "",
         "This recommendation depends on the configured backend or estimate "
         "model and its assumptions. It is not a plant operating procedure.",
@@ -651,215 +798,407 @@ def generate_report(results: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
+def _priority_winners(
+    profile_metrics: Mapping[str, SimulationMetrics],
+) -> dict[str, str]:
+    """Return the profile that wins for each explicit priority mode."""
+    speed_winner = min(
+        profile_metrics,
+        key=lambda name: profile_metrics[name].startup_time_minutes,
+    )
+    cost_winner = min(
+        profile_metrics,
+        key=lambda name: profile_metrics[name].startup_cost,
+    )
+    stability_winner = max(
+        profile_metrics,
+        key=lambda name: (
+            profile_metrics[name].flashing_margin
+            - 0.5 * profile_metrics[name].density_wave_oscillation_index
+            - 0.5 * profile_metrics[name].pressure_oscillation_index
+            - 0.25 * profile_metrics[name].thermal_stress
+        ),
+    )
+    return {
+        PriorityMode.STABILITY.value: stability_winner,
+        PriorityMode.SPEED.value: speed_winner,
+        PriorityMode.COST.value: cost_winner,
+    }
+
+
+def generate_priority_summary_chart(
+    results: pd.DataFrame,
+    simulator: StartupSimulator | None = None,
+    output_path: str | Path = "results/improvements/priority_summary.png",
+) -> plt.Figure:
+    """Show the clear winner for each priority mode."""
+    if results.empty:
+        raise ValueError("Cannot summarize priorities from an empty result set.")
+    simulator = simulator or LiteratureBasedEstimateSimulator()
+    ranked = rank_pareto_candidates(results)
+    selected_candidate = ranked.iloc[0]
+    optimized = OptimizedStartupProcedure.from_candidate(selected_candidate)
+    profiles = comparison_startup_profiles(optimized)
+    profile_metrics = {
+        profile.name: (
+            SimulationMetrics.from_mapping(selected_candidate.to_dict())
+            if profile.name == "Optimized Startup"
+            else simulator.evaluate(profile.procedure)
+        )
+        for profile in profiles
+    }
+    winners = _priority_winners(profile_metrics)
+    labels = ["Better for stability", "Better for speed/cost"]
+    winner_names = [
+        winners[PriorityMode.STABILITY.value],
+        winners[PriorityMode.SPEED.value],
+    ]
+    colors = ["#2f6f4e", "#3467c8"]
+    fig, axis = plt.subplots(figsize=(8, 4.5))
+    bars = axis.bar(labels, [1.0, 1.0], color=colors, alpha=0.9, width=0.7)
+    axis.set_ylim(0, 1.5)
+    axis.set_yticks([])
+    axis.set_title("BWRX-300 Startup Priority Summary")
+    axis.set_ylabel("Winner by priority")
+    for bar, winner in zip(bars, winner_names, strict=False):
+        x = bar.get_x() + bar.get_width() / 2
+        axis.text(
+            x,
+            0.45,
+            winner,
+            ha="center",
+            va="center",
+            fontsize=10,
+            color="white",
+            fontweight="bold",
+        )
+    for spine in (axis.spines["top"], axis.spines["right"]):
+        spine.set_visible(False)
+    axis.spines["left"].set_visible(False)
+    axis.spines["bottom"].set_color("#444")
+    fig.tight_layout()
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_file, dpi=180)
+    return fig
+
+
 def generate_improvement_report(
     results: pd.DataFrame,
     simulator: StartupSimulator | None = None,
-    output_directory: str | Path = "results/improvements",
+    output_path: str | Path = "results/improvement_report.txt",
 ) -> str:
-    """Compare the fixed baseline against the top-ranked Pareto candidate.
-
-    The comparison and its four bar charts are written to output_directory.
-    Percentage change is (baseline - optimized) / baseline; negative time or
-    cost percentages are explicitly reported as a performance worsening.
-    """
+    """Produce a presentation-ready BWRX-300 startup comparison summary."""
     if results.empty:
         raise ValueError("Cannot compare procedures from an empty result set.")
-
     simulator = simulator or LiteratureBasedEstimateSimulator()
     ranked = rank_pareto_candidates(results)
-    candidate = ranked.iloc[0]
-    baseline = BaselineStartupProcedure()
-    optimized = OptimizedStartupProcedure.from_candidate(candidate)
-    baseline_metrics = simulator.evaluate(baseline)
-    optimized_metrics = SimulationMetrics.from_mapping(candidate.to_dict())
-
-    metrics = (
-        ("Flashing Instability Risk", "flashing_instability_risk"),
-        ("Density Wave Oscillation Risk", "density_wave_oscillation_risk"),
-        ("Geysering Risk", "geysering_risk"),
-        ("Thermal Stress", "thermal_stress"),
-        ("Startup Time", "startup_time_minutes"),
-        ("Startup Cost", "startup_cost"),
+    selected_candidate = ranked.iloc[0]
+    optimized = OptimizedStartupProcedure.from_candidate(selected_candidate)
+    profiles = comparison_startup_profiles(optimized)
+    profile_metrics = {
+        profile.name: (
+            SimulationMetrics.from_mapping(selected_candidate.to_dict())
+            if profile.name == "Optimized Startup"
+            else simulator.evaluate(profile.procedure)
+        )
+        for profile in profiles
+    }
+    winners = _priority_winners(profile_metrics)
+    baseline_name = "Conservative Startup"
+    metric_names = (
+        ("Flashing Margin", "flashing_margin", "higher"),
+        ("DWO Index", "density_wave_oscillation_index", "lower"),
+        ("Pressure Oscillation Index", "pressure_oscillation_index", "lower"),
+        ("Thermal Stress", "thermal_stress", "lower"),
+        ("Startup Duration", "startup_time_minutes", "lower"),
+        ("Startup Cost", "startup_cost", "lower"),
     )
-    rows = []
-    for label, name in metrics:
-        baseline_value = float(getattr(baseline_metrics, name))
-        optimized_value = float(getattr(optimized_metrics, name))
-        percent = (
-            (baseline_value - optimized_value) / baseline_value * 100.0
-            if baseline_value != 0.0
-            else None
-        )
-        status = ""
-        if name in {"startup_time_minutes", "startup_cost"}:
-            if percent is None:
-                status = " (comparison unavailable)"
-            elif percent > 0.0:
-                status = " (improved)"
-            elif percent < 0.0:
-                status = " (worsened)"
-            else:
-                status = " (unchanged)"
-        rows.append(
-            (
-                label,
-                baseline_value,
-                optimized_value,
-                f"{percent:+.2f}%{status}" if percent is not None else "N/A (baseline 0)",
-            )
-        )
-
-    output_path = Path(output_directory)
-    output_path.mkdir(parents=True, exist_ok=True)
-    is_estimate = isinstance(simulator, LiteratureBasedEstimateSimulator)
-    if is_estimate:
-        qualification = [
-            "Literature-based engineering estimates used to demonstrate the "
-            "startup optimization framework.",
-            "",
-            "These are illustrative, qualitative-trend estimates—not predictive "
-            "reactor simulations, validated literature correlations, or "
-            "operating guidance. Sensitivity factors in "
-            "LiteratureBasedEstimateSimulator are demonstration assumptions, "
-            "not values calibrated against BWRX-300 data.",
-        ]
-    else:
-        qualification = [
-            "Startup procedure comparison using the configured simulator backend.",
-            "",
-            "These outputs are simulator results, not validated plant-operating "
-            "guidance; validate the backend and its applicability independently.",
-        ]
-    procedure_lines = [
-        *qualification,
+    lines = [
+        _provenance_statement(simulator),
         "",
-        "Baseline Procedure",
-        f"Power ramp rate: {baseline.power_ramp_rate:.3f} %FP/min",
-        f"Pressure ramp rate: {baseline.pressure_ramp_rate:.3f} MPa/min",
-        f"Boiling initiation pressure: "
-        f"{baseline.boiling_initiation_pressure:.3f} MPa",
-        f"Inlet subcooling: {baseline.inlet_subcooling:.2f} C",
-        f"Hold schedule: {baseline.to_payload()['hold_schedule']}",
+        "BWRX-300 startup comparison summary",
+        "This comparison evaluates a baseline startup sequence against a Pareto-optimized",
+        "startup strategy for a BWRX-300-style natural-circulation startup envelope.",
+        "The results are literature-informed engineering estimates, not validated reactor",
+        "transient predictions or operating limits.",
         "",
-        "Optimized Procedure (selected from Pareto-optimal solutions)",
-        f"Power ramp rate: {optimized.power_ramp_rate:.3f} %FP/min",
-        f"Pressure ramp rate: {optimized.pressure_ramp_rate:.3f} MPa/min",
-        f"Boiling initiation pressure: "
-        f"{optimized.boiling_initiation_pressure:.3f} MPa",
-        f"Inlet subcooling: {optimized.inlet_subcooling:.2f} C",
-        f"Hold schedule: {optimized.to_payload()['hold_schedule']}",
+        "Priority-based interpretation",
+        f"- Stability-priority winner: {winners[PriorityMode.STABILITY.value]}",
+        f"- Speed-priority winner: {winners[PriorityMode.SPEED.value]}",
+        f"- Cost-priority winner: {winners[PriorityMode.COST.value]}",
+        "- Overall compromise candidate: Optimized Startup",
         "",
-        "Improvement Table",
-        f"{'Metric':<34} {'Baseline':>14} {'Optimized':>14} "
-        f"{'Percent Improvement':>25}",
-        "-" * 91,
+        "Startup profiles",
     ]
-    for label, baseline_value, optimized_value, percent in rows:
-        procedure_lines.append(
-            f"{label:<34} {baseline_value:>14.3f} "
-            f"{optimized_value:>14.3f} {percent:>25}"
+    for profile in profiles:
+        conditions = profile.procedure.initial_conditions
+        lines.extend(
+            [
+                profile.name,
+                f"  Type: {profile.procedure.startup_type.value}",
+                f"  Initial pressure: {conditions.pressure_mpa:.3f} MPa",
+                f"  Initial temperature: {conditions.temperature_c:.1f} C",
+                f"  Power ramp: {profile.procedure.power_ramp_rate:.3f} %FP/min",
+                f"  Pressure ramp: {profile.procedure.pressure_ramp_rate:.3f} MPa/min",
+                f"  Hold points: {len(profile.procedure.hold_schedule)}",
+            ]
         )
-
-    risk_improvements = [
-        (baseline_value - optimized_value) / baseline_value * 100.0
-        for _, name in metrics[:3]
-        for baseline_value, optimized_value in [
-            (
-                float(getattr(baseline_metrics, name)),
-                float(getattr(optimized_metrics, name)),
-            )
-        ]
-        if baseline_value > 0.0
-    ]
-    time_change = next(
-        float(getattr(optimized_metrics, name))
-        - float(getattr(baseline_metrics, name))
-        for _, name in metrics
-        if name == "startup_time_minutes"
-    )
-    if time_change > 0.0 and risk_improvements and all(
-        improvement > 0.0 for improvement in risk_improvements
-    ):
-        duration_description = (
-            "modest"
-            if time_change <= 0.2 * baseline_metrics.startup_time_minutes
-            else "substantial"
-        )
-        interpretation = (
-            f"The optimized startup procedure accepts a {duration_description} "
-            "increase in startup duration in exchange for reductions in "
-            "flashing instability risk, density-wave oscillation risk, and "
-            "geysering susceptibility."
-        )
-    else:
-        interpretation = (
-            "The optimized procedure represents a normalized multi-objective "
-            "compromise. Review the table for the measured estimated trade-offs; "
-            "the ranking does not imply that the procedure is inherently safer."
-        )
-    procedure_lines.extend(
+    lines.extend(
         [
             "",
-            "Engineering Interpretation",
-            interpretation,
-            "Risk values are separate illustrative indices on a 0-100 scale. "
-            "Startup cost is a relative index, not a currency estimate.",
-            "Future validated MOOSE THM or OpenFOAM/GeN-Foam integrations can "
-            "replace the estimate model through STARTUP_SIMULATOR.",
+            "Direct metric comparison",
+            f"{'Metric':<30} {'Aggressive':>14} {'Conservative':>14} "
+            f"{'Optimized':>14} {'Improvement %':>16}",
+            "-" * 94,
         ]
     )
-    report = "\n".join(procedure_lines)
-    (output_path / "improvement_summary.txt").write_text(
-        report + "\n",
-        encoding="utf-8",
+    baseline = profile_metrics[baseline_name]
+    optimized_metrics = profile_metrics["Optimized Startup"]
+    improvement_rows = []
+    for label, name, direction in metric_names:
+        values = {
+            profile_name: float(getattr(metrics, name))
+            for profile_name, metrics in profile_metrics.items()
+        }
+        baseline_value = float(getattr(baseline, name))
+        optimized_value = float(getattr(optimized_metrics, name))
+        if baseline_value == 0.0:
+            improvement = "N/A"
+        elif direction == "higher":
+            improvement = f"{(optimized_value - baseline_value) / abs(baseline_value) * 100.0:+.2f}%"
+        else:
+            improvement = f"{(baseline_value - optimized_value) / abs(baseline_value) * 100.0:+.2f}%"
+        improvement_rows.append((label, baseline_value, optimized_value, improvement))
+        lines.append(
+            f"{label:<30} {values['Aggressive Startup']:>14.3f} "
+            f"{baseline_value:>14.3f} {optimized_value:>14.3f} "
+            f"{improvement:>16}"
+        )
+    lines.extend(
+        [
+            "",
+            "Baseline versus optimized startup",
+            "The conservative startup profile is used as the baseline reference for the",
+            "comparison. Positive percent change indicates movement in the preferred",
+            "direction for that metric.",
+            f"{'Metric':<30} {'Baseline':>14} {'Optimized':>14} "
+            f"{'Improvement %':>16}",
+            "-" * 78,
+        ]
     )
+    lines.extend(
+        f"{label:<30} {baseline_value:>14.3f} "
+        f"{optimized_value:>14.3f} {improvement:>16}"
+        for label, baseline_value, optimized_value, improvement in improvement_rows
+    )
+    lines.extend(
+        [
+            "",
+            "Engineering interpretation",
+            "The optimized profile is selected as a balanced compromise across startup",
+            "duration, startup cost, and stability margins. It is not the lowest-risk profile",
+            "for every metric, and it is not the fastest profile in every case; instead, it",
+            "represents the best overall tradeoff within the modelled startup envelope.",
+            "For a stability-focused startup, the conservative profile remains the best fit.",
+            "For a time- and cost-driven startup, the aggressive profile is preferred.",
+            "For a balanced BWRX-300 decision case, the optimized profile is the preferred",
+            "overall compromise in this framework.",
+            "Startup cost index = lost_generation_index + operator_intervention_index +",
+            "thermal_stress_penalty.",
+            "The 0.4 MPa flashing threshold and 0.7 MPa stable two-phase threshold remain",
+            "demonstration-only thresholds for the literature-informed estimate model.",
+            "This comparison does not represent validated reactor startup predictions.",
+        ]
+    )
+    report = "\n".join(lines)
+    report_file = Path(output_path)
+    report_file.parent.mkdir(parents=True, exist_ok=True)
+    report_file.write_text(report + "\n", encoding="utf-8")
+    return report
 
-    chart_specs = (
-        (
-            "flashing_risk_comparison.png",
-            "Baseline vs Optimized Flashing Risk",
-            baseline_metrics.flashing_instability_risk,
-            optimized_metrics.flashing_instability_risk,
-        ),
-        (
-            "dwo_risk_comparison.png",
-            "Baseline vs Optimized DWO Risk",
-            baseline_metrics.density_wave_oscillation_risk,
-            optimized_metrics.density_wave_oscillation_risk,
-        ),
-        (
-            "geysering_risk_comparison.png",
-            "Baseline vs Optimized Geysering Risk",
-            baseline_metrics.geysering_risk,
-            optimized_metrics.geysering_risk,
-        ),
-        (
-            "thermal_stress_comparison.png",
-            "Baseline vs Optimized Thermal Stress",
-            baseline_metrics.thermal_stress,
-            optimized_metrics.thermal_stress,
-        ),
+
+def generate_improvement_charts(
+    results: pd.DataFrame,
+    simulator: StartupSimulator | None = None,
+    output_directory: str | Path = "results/improvements",
+) -> dict[str, plt.Figure]:
+    """Create presentation-ready baseline-vs-optimized bar charts."""
+    if results.empty:
+        raise ValueError("Cannot compare procedures from an empty result set.")
+    simulator = simulator or LiteratureBasedEstimateSimulator()
+    ranked = rank_pareto_candidates(results)
+    selected_candidate = ranked.iloc[0]
+    optimized = OptimizedStartupProcedure.from_candidate(selected_candidate)
+    profiles = comparison_startup_profiles(optimized)
+    profile_metrics = {
+        profile.name: (
+            SimulationMetrics.from_mapping(selected_candidate.to_dict())
+            if profile.name == "Optimized Startup"
+            else simulator.evaluate(profile.procedure)
+        )
+        for profile in profiles
+    }
+    baseline_name = "Conservative Startup"
+    metric_specs = (
+        ("Flashing Margin", "flashing_margin", "higher"),
+        ("DWO Index", "density_wave_oscillation_index", "lower"),
+        ("Pressure Oscillation Index", "pressure_oscillation_index", "lower"),
+        ("Thermal Stress", "thermal_stress", "lower"),
     )
-    for filename, title, baseline_value, optimized_value in chart_specs:
-        figure, axis = plt.subplots()
-        axis.bar(
+    output_path = Path(output_directory)
+    output_path.mkdir(parents=True, exist_ok=True)
+    figures: dict[str, plt.Figure] = {}
+    for label, name, direction in metric_specs:
+        baseline_value = float(getattr(profile_metrics[baseline_name], name))
+        optimized_value = float(getattr(profile_metrics["Optimized Startup"], name))
+        fig, axis = plt.subplots(figsize=(6, 4))
+        bars = axis.bar(
             ["Baseline", "Optimized"],
             [baseline_value, optimized_value],
-            color=["#6c757d", "#2a9d8f"],
+            color=["#6b7280", "#2f6f4e"],
+            width=0.7,
         )
-        axis.set(
-            title=title,
-            ylabel=(
-                "Illustrative estimate"
-                if is_estimate
-                else "Configured simulator output"
-            ),
+        axis.set_title(f"Baseline vs Optimized {label}")
+        axis.set_ylabel(label)
+        axis.grid(True, axis="y", alpha=0.25)
+        if direction == "higher":
+            axis.set_ylim(bottom=0)
+        else:
+            axis.set_ylim(bottom=0)
+        for bar, value in zip(bars, [baseline_value, optimized_value], strict=False):
+            axis.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + max(abs(value) * 0.03, 0.2),
+                f"{value:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
+        fig.tight_layout()
+        filename = f"baseline_vs_optimized_{label.lower().replace(' ', '_').replace('-', '_')}.png"
+        fig.savefig(output_path / filename, dpi=180)
+        figures[label] = fig
+    return figures
+
+
+def _provenance_statement(simulator: StartupSimulator) -> str:
+    if isinstance(simulator, LiteratureBasedEstimateSimulator):
+        return (
+            "LITERATURE-BASED ESTIMATES: qualitative trend demonstration only; "
+            "not validated correlations or reactor performance predictions."
         )
-        axis.grid(axis="y", alpha=0.25)
-        figure.tight_layout()
-        figure.savefig(output_path / filename, dpi=160)
-        plt.close(figure)
-    return report
+    return (
+        "EXTERNAL SIMULATOR OUTPUTS: validation status depends on the configured "
+        "backend; this optimizer does not certify model validity."
+    )
+
+
+def _stability_sensitivity_score(
+    baseline: SimulationMetrics,
+    alternative: SimulationMetrics,
+) -> float:
+    """Return mean fractional change across margin and two stability indices."""
+    effects = []
+    for name in (
+        "flashing_margin",
+        "density_wave_oscillation_index",
+        "pressure_oscillation_index",
+    ):
+        reference = float(getattr(baseline, name))
+        changed = float(getattr(alternative, name))
+        scale = max(abs(reference), 0.1)
+        effects.append(abs(changed - reference) / scale)
+    return sum(effects) / len(effects)
+
+
+def perform_sensitivity_analysis(
+    simulator: StartupSimulator,
+    search_space: SearchSpace = SearchSpace(),
+) -> pd.DataFrame:
+    """Rank input-variable effects using one-at-a-time sensitivity estimates."""
+    reference = BaselineStartupProcedure()
+    baseline_metrics = simulator.evaluate(reference)
+    comparisons = {
+        "power_ramp_rate": [
+            replace(reference, power_ramp_rate=value)
+            for value in search_space.power_ramp_bounds
+        ],
+        "pressure_ramp_rate": [
+            replace(reference, pressure_ramp_rate=value)
+            for value in search_space.pressure_ramp_bounds
+        ],
+        "boiling_initiation_pressure": [
+            replace(reference, boiling_initiation_pressure=value)
+            for value in search_space.boiling_pressure_bounds
+        ],
+        "inlet_subcooling": [
+            replace(reference, inlet_subcooling=value)
+            for value in search_space.inlet_subcooling_bounds
+        ],
+        "startup_type": [
+            replace(reference, startup_type=startup_type)
+            for startup_type in search_space.startup_types
+        ],
+        "hold_schedule": [
+            replace(
+                reference,
+                hold_schedule=tuple(HoldPoint(level, 20.0) for level in schedule),
+            )
+            for schedule in search_space.hold_schedules
+        ],
+        "hold_duration_minutes": [
+            replace(
+                reference,
+                hold_schedule=tuple(
+                    HoldPoint(level, duration) for level in (25, 50, 75)
+                ),
+            )
+            for duration in search_space.hold_duration_bounds
+        ],
+    }
+    rows = []
+    for variable, procedures in comparisons.items():
+        scores = [
+            _stability_sensitivity_score(
+                baseline_metrics,
+                simulator.evaluate(procedure),
+            )
+            for procedure in procedures
+        ]
+        rows.append(
+            {
+                "variable": variable,
+                "importance_score": max(scores, default=0.0),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(
+        "importance_score", ascending=False
+    ).reset_index(drop=True)
+
+
+def generate_sensitivity_report(
+    simulator: StartupSimulator,
+    output_path: str | Path = "results/sensitivity_analysis.txt",
+) -> tuple[pd.DataFrame, str]:
+    """Write and return a ranked one-at-a-time sensitivity summary."""
+    importance = perform_sensitivity_analysis(simulator)
+    lines = [
+        _provenance_statement(simulator),
+        "",
+        "Ranked Variable Importance (one-at-a-time stability sensitivity)",
+        "Scores are relative to the baseline and depend on the selected "
+        "estimate/backend and parameter bounds.",
+    ]
+    lines.extend(
+        f"{rank}. {row.variable}: {row.importance_score:.4f}"
+        for rank, row in enumerate(importance.itertuples(index=False), start=1)
+    )
+    report = "\n".join(lines)
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(report + "\n", encoding="utf-8")
+    return importance, report
 
 
 def load_simulator_from_environment() -> StartupSimulator:
@@ -877,7 +1216,7 @@ def load_simulator_from_environment() -> StartupSimulator:
 
 
 def main() -> None:
-    """Run NSGA-II with the configured external simulator and export results."""
+    """Run NSGA-II with the selected simulator and export comparison reports."""
     simulator = load_simulator_from_environment()
     results = run_parameter_sweep(simulator)
     results.to_csv("startup_optimization_results.csv", index=False)
@@ -888,14 +1227,19 @@ def main() -> None:
         encoding="utf-8",
     )
     improvement_report = generate_improvement_report(results, simulator)
+    generate_improvement_charts(results, simulator, "results/improvements")
+    _, sensitivity_report = generate_sensitivity_report(simulator)
+    priority_summary = generate_priority_summary_chart(results, simulator)
     print(f"Recorded {len(results):,} unique simulator evaluations.")
     print(f"Pareto candidates: {int(results['is_pareto'].sum()):,}")
     print(
-        "Saved startup_optimization_results.csv, Pareto plots, and improvement "
-        "comparison under results/."
+        "Saved startup_optimization_results.csv, Pareto plots, improvement charts, "
+        "priority summary, and sensitivity reports under results/."
     )
+    print("\nPriority summary chart saved to results/improvements/priority_summary.png")
     print("\n" + report)
     print("\n" + improvement_report)
+    print("\n" + sensitivity_report)
 
 
 if __name__ == "__main__":

@@ -169,13 +169,14 @@ def run_moose_transient(
 
 def _procedure_from_payload(payload: dict[str, Any]) -> Any:
     """Adapt the stable payload contract to startup_optimization dataclasses."""
-    from startup_optimization import HoldPoint, StartupProcedure
+    from startup_optimization import HoldPoint, StartupProcedure, StartupType
 
     return StartupProcedure(
         power_ramp_rate=float(payload["power_ramp_rate"]),
         pressure_ramp_rate=float(payload["pressure_ramp_rate"]),
         boiling_initiation_pressure=float(payload["boiling_initiation_pressure"]),
         inlet_subcooling=float(payload["inlet_subcooling"]),
+        startup_type=StartupType(payload.get("startup_type", "COLD")),
         hold_schedule=tuple(
             HoldPoint(
                 power_percent=int(point["power_percent"]),

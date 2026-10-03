@@ -1,8 +1,8 @@
 """Metric extraction hooks for validated transient data and coupled analyses.
 
-No empirical risk functions or synthetic scores belong in this module. Complete
-these hooks using qualified correlations, validation evidence, and the necessary
-MOOSE/OpenFOAM/GeN-Foam and structural-analysis outputs before optimization.
+Implement these hooks with qualified methods, validation evidence, and the
+necessary MOOSE/OpenFOAM/GeN-Foam and structural-analysis outputs before using
+the backend for engineering decisions.
 """
 
 from __future__ import annotations
@@ -12,71 +12,71 @@ from typing import Any
 from .parser import TransientOutput, calculate_startup_time_minutes
 
 
-def calculate_flashing_risk(transient: TransientOutput) -> float:
-    """Extract flashing risk from pressure, local saturation state, and flow.
+def calculate_flashing_margin(transient: TransientOutput) -> float:
+    """Extract a flashing margin with its state variables and pressure basis.
 
-    Required model outputs typically include local pressure, fluid temperature
-    or enthalpy, vapor quality/void fraction, and mass flow versus time. Apply a
-    validated flashing-instability criterion with documented normalization to
-    0-100. Do not substitute a guessed pressure threshold or heuristic score.
+    The optimizer's built-in pressure thresholds are illustrative only. This
+    backend must provide a validated criterion with defined units and sign.
     """
     raise NotImplementedError(
-        "Implement with validated flashing criteria and transient state outputs."
+        "Implement a validated flashing-margin criterion and document its basis."
     )
 
 
-def calculate_density_wave_oscillation_risk(transient: TransientOutput) -> float:
-    """Extract DWO risk from time-resolved two-phase flow and power signals.
-
-    Use appropriately sampled pressure-drop, mass-flow, void/quality, and power
-    histories, then apply a validated stability map or documented signal-analysis
-    criterion. Include sampling adequacy and uncertainty; return a normalized
-    0-100 quantity only when that mapping is scientifically defined.
-    """
+def calculate_density_wave_oscillation_index(
+    transient: TransientOutput,
+) -> float:
+    """Extract DWO index from adequately sampled flow and pressure histories."""
     raise NotImplementedError(
-        "Implement with validated DWO criteria and sampled transient outputs."
+        "Implement a validated DWO index from sampled transient outputs."
     )
 
 
-def calculate_geysering_risk(transient: TransientOutput) -> float:
-    """Extract geysering risk from pressure, subcooling, void, and flow histories.
-
-    Required outputs include pressure, fluid and wall temperatures (or subcooling),
-    void/quality, and mass-flow time series. Use a validated geysering criterion
-    and explicit event/window aggregation; do not infer risk from inputs alone.
-    """
+def calculate_pressure_oscillation_index(transient: TransientOutput) -> float:
+    """Extract a documented pressure-oscillation metric from transient data."""
     raise NotImplementedError(
-        "Implement with validated geysering criteria and transient state outputs."
+        "Implement a validated pressure-oscillation metric and units."
     )
 
 
 def calculate_thermal_stress(transient: TransientOutput) -> float:
-    """Extract stress from a coupled structural solution or validated stress data.
-
-    THM temperature and pressure traces alone are insufficient to establish
-    component stress. A structural model needs geometry, constraints, material
-    properties, temperature/pressure loads, and a defined stress metric; preserve
-    the peak and location/time metadata when reducing its output.
-    """
+    """Extract stress from coupled structural results or validated stress data."""
     raise NotImplementedError(
         "Provide validated structural/thermal-stress results before scoring."
     )
 
 
-def calculate_startup_cost(
+def calculate_lost_generation_index(
     transient: TransientOutput,
     *,
     startup_time_minutes: float,
     context: dict[str, Any] | None = None,
 ) -> float:
-    """Calculate cost using supplied economic/operational context and outputs.
-
-    Required assumptions/data include lost net generation over the measured
-    startup, energy prices, staffing/labor rates, and any approved startup cost
-    model. Keep currency, reference period, and treatment of downtime explicit.
-    """
+    """Calculate a consistent lost-generation index from approved assumptions."""
     raise NotImplementedError(
-        "Provide an approved cost model and economic context before optimization."
+        "Provide approved lost-generation assumptions and transient outputs."
+    )
+
+
+def calculate_operator_intervention_index(
+    transient: TransientOutput,
+    context: dict[str, Any] | None = None,
+) -> float:
+    """Calculate an intervention index from documented operational assumptions."""
+    raise NotImplementedError(
+        "Provide an approved operator-intervention method and evidence."
+    )
+
+
+def calculate_thermal_stress_penalty(
+    transient: TransientOutput,
+    *,
+    thermal_stress: float,
+    context: dict[str, Any] | None = None,
+) -> float:
+    """Map validated thermal stress to the startup-cost penalty scale."""
+    raise NotImplementedError(
+        "Provide an approved thermal-stress penalty mapping and units."
     )
 
 
@@ -85,19 +85,31 @@ def extract_simulation_metrics(
     *,
     cost_context: dict[str, Any] | None = None,
 ) -> dict[str, float]:
-    """Build the optimizer metric mapping after all extraction hooks are validated."""
+    """Return the metric contract; startup cost is summed from its components."""
     startup_time = calculate_startup_time_minutes(transient)
+    thermal_stress = calculate_thermal_stress(transient)
     return {
         "startup_time_minutes": startup_time,
-        "flashing_instability_risk": calculate_flashing_risk(transient),
-        "density_wave_oscillation_risk": calculate_density_wave_oscillation_risk(
+        "flashing_margin": calculate_flashing_margin(transient),
+        "density_wave_oscillation_index": (
+            calculate_density_wave_oscillation_index(transient)
+        ),
+        "pressure_oscillation_index": calculate_pressure_oscillation_index(
             transient
         ),
-        "geysering_risk": calculate_geysering_risk(transient),
-        "thermal_stress": calculate_thermal_stress(transient),
-        "startup_cost": calculate_startup_cost(
+        "thermal_stress": thermal_stress,
+        "lost_generation_index": calculate_lost_generation_index(
             transient,
             startup_time_minutes=startup_time,
+            context=cost_context,
+        ),
+        "operator_intervention_index": calculate_operator_intervention_index(
+            transient,
+            context=cost_context,
+        ),
+        "thermal_stress_penalty": calculate_thermal_stress_penalty(
+            transient,
+            thermal_stress=thermal_stress,
             context=cost_context,
         ),
     }

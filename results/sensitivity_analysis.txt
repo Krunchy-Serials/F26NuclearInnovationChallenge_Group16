@@ -1,0 +1,11 @@
+LITERATURE-BASED ESTIMATES: qualitative trend demonstration only; not validated correlations or reactor performance predictions.
+
+Ranked Variable Importance (one-at-a-time stability sensitivity)
+Scores are relative to the baseline and depend on the selected estimate/backend and parameter bounds.
+1. boiling_initiation_pressure: 1.0869
+2. hold_duration_minutes: 0.2916
+3. hold_schedule: 0.1953
+4. power_ramp_rate: 0.1643
+5. pressure_ramp_rate: 0.0645
+6. inlet_subcooling: 0.0485
+7. startup_type: 0.0369
