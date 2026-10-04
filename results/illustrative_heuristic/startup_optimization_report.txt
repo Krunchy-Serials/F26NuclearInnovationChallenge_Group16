@@ -1,0 +1,28 @@
+Recommended Pareto Compromise
+Power ramp rate: 1.869 %FP/min
+Pressure ramp rate: 0.184 MPa/min
+Boiling initiation pressure: 6.925 MPa
+Inlet subcooling: 41.82 C
+Startup type: HOT
+Initial pressure: 2.000 MPa
+Initial temperature: 200.0 C
+Hold point schedule: [{'power_percent': 25, 'duration_minutes': 55.312328120248324}, {'power_percent': 50, 'duration_minutes': 55.312328120248324}, {'power_percent': 75, 'duration_minutes': 55.312328120248324}]
+Startup time: 257.24 minutes
+Flashing-margin score (arbitrary units): 7.055
+DWO index: 18.394
+Pressure oscillation index: 31.075
+Thermal stress: 37.672
+Startup cost: 162.386
+Decision-support score: 0.7139
+
+Top Pareto Candidates
+1. score=0.7139, time=257.24 min, cost=162.386, stability=(flashing score 7.055, DWO 18.394, pressure oscillation 31.075)
+2. score=0.7052, time=154.65 min, cost=110.986, stability=(flashing score 4.460, DWO 32.530, pressure oscillation 27.678)
+3. score=0.6842, time=221.62 min, cost=144.881, stability=(flashing score 6.676, DWO 14.930, pressure oscillation 37.281)
+4. score=0.6807, time=55.50 min, cost=31.613, stability=(flashing score 5.616, DWO 47.771, pressure oscillation 40.650)
+5. score=0.6765, time=92.62 min, cost=59.943, stability=(flashing score 2.437, DWO 41.946, pressure oscillation 29.646)
+
+The selected candidate is a normalized compromise across the six backend outputs. Flashing margin, DWO index, and pressure oscillation index remain separate metrics.
+
+This recommendation depends on the configured backend or estimate model and its assumptions. It is not a plant operating procedure.
+When the built-in model is active, these are unvalidated heuristic scores, not literature-derived correlations or reactor simulations.

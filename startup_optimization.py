@@ -1,13 +1,15 @@
 """NSGA-II optimization and comparison of estimated BWR startup procedures.
 
-Without STARTUP_SIMULATOR, results use an explicitly unvalidated heuristic
-model. The qualitative directions are informed by startup-instability
-literature, but the equations and coefficients are project assumptions, not
-published correlations. The outputs are not reactor simulations or predictions.
+Without STARTUP_SIMULATOR, the command reports evidence status unless the
+unvalidated heuristic mode is explicitly selected. Heuristic trend directions
+are informed by startup-instability literature, but the equations and
+coefficients are project assumptions, not published correlations. Those
+outputs are not reactor simulations or predictions.
 """
 
 from __future__ import annotations
 
+import argparse
 import importlib
 import json
 import math
@@ -1236,9 +1238,61 @@ def load_simulator_from_environment() -> StartupSimulator:
     return factory()
 
 
+def print_public_evidence_status() -> None:
+    """Explain why no predictive scores are emitted without validated inputs."""
+    print("BWR startup optimization: public-evidence status")
+    print(
+        "No startup scores were calculated because no simulator backend is "
+        "configured. Public sources reviewed do not provide a verified, "
+        "runnable BWR transient model with matching benchmark measurements."
+    )
+    print(
+        "NUREG/CR-2998 reports LAPUR-IV stability comparisons for generic BWR "
+        "low-flow tests; public VERA Peach Bottom 2 inputs are static "
+        "neutronics cases, not startup transients."
+    )
+    print(
+        "These sources do not validate BWRX-300 startup metrics or the "
+        "optimizer's built-in heuristic equations."
+    )
+    print(
+        "See public_bwr_benchmark_review.md for citations and the evidence "
+        "limitations. Configure a validated external simulator, or explicitly "
+        "opt into the non-predictive demo with --illustrative."
+    )
+
+
 def main() -> None:
-    """Run NSGA-II with the selected simulator and export comparison reports."""
-    simulator = load_simulator_from_environment()
+    """Run a selected simulator or print evidence status without one."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--illustrative",
+        action="store_true",
+        help=(
+            "Run the built-in, unvalidated heuristic demo. Its outputs are "
+            "not literature-derived or predictive."
+        ),
+    )
+    args = parser.parse_args()
+    configured_backend = os.environ.get("STARTUP_SIMULATOR")
+    if args.illustrative and configured_backend:
+        parser.error(
+            "--illustrative cannot be combined with STARTUP_SIMULATOR; "
+            "unset STARTUP_SIMULATOR to select the demo."
+        )
+
+    if args.illustrative:
+        simulator: StartupSimulator = IllustrativeHeuristicSimulator()
+    elif (
+        not configured_backend
+        and os.environ.get("STARTUP_ESTIMATE_MODE", "").strip().lower()
+        != "illustrative"
+    ):
+        print_public_evidence_status()
+        return
+    else:
+        simulator = load_simulator_from_environment()
+
     illustrative = isinstance(simulator, IllustrativeHeuristicSimulator)
     output_directory = (
         Path("results/illustrative_heuristic")

@@ -18,9 +18,25 @@ the project's coefficients or establish BWRX-300 operating conditions.
 - save CSV, HTML, PNG, and text outputs for review
 
 This is research tooling, not a plant operating procedure. Without a configured
-external simulator, the optimizer stops rather than silently presenting
-heuristic values as research-backed results. An illustrative heuristic mode is
-available only by explicit opt-in and writes to a separate output directory.
+external simulator, the optimizer prints public-evidence status and produces no
+scores. An illustrative heuristic mode is available only by explicit opt-in
+(`python startup_optimization.py --illustrative` or
+`STARTUP_ESTIMATE_MODE=illustrative`) and writes to a separate output directory.
+
+`type2_stability_analysis.py` reports the public Type 2 stability evidence
+status by default. Its optional `--illustrative` mode ranks conditions using a
+project-assumption index. Those coefficients and the BWRX-300-labeled example
+are not plant data or a validated reactor simulation.
+
+See the [public BWR benchmark review](public_bwr_benchmark_review.md) for the
+available literature, data limitations, and validation requirements.
+Run `python plot_public_bwr_evidence.py` to generate six figures under
+`results/literature_evidence/`. In addition to the published Peach Bottom 2
+turbine-trip comparison and evidence-status figures, the script plots
+literature-reported Type I/II density-wave classifications and generic
+experimental startup-loop observations. Approximate digitization and
+facility-specific scope are called out in the figures; none is BWRX-300
+validation or a reactor simulation.
 
 ## Repository layout
 
@@ -196,8 +212,9 @@ but not by swapping published constants into the current scoring equations:
   plumbing; it cannot independently predict boiling instability.
 
 Accordingly, the present code does not yet implement these papers' predictive
-methods. It now requires an explicitly configured external simulator for normal
-optimization. The old heuristic can be run only with
+methods. Running the optimizer requires an explicitly configured external
+simulator; without one, it reports evidence status and computes no scores. The
+old heuristic can be run only with `--illustrative` or
 `STARTUP_ESTIMATE_MODE=illustrative`, and its outputs are segregated. A
 research prototype should only be added after a reproducible model and
 comparison dataset have been selected and independently checked. Any
@@ -267,8 +284,9 @@ heuristic outputs only**, not research-backed performance findings.
 - plots showing trade-offs between startup duration, cost, and stability metrics
 - profile comparison and sensitivity reports in the simulator-specific output directory
 
-Without an external simulator, running without explicit heuristic opt-in stops.
-When `STARTUP_ESTIMATE_MODE=illustrative` is set, the output directory is
+Without an external simulator, the command prints public-evidence status and
+does not run the optimizer. With `--illustrative` or
+`STARTUP_ESTIMATE_MODE=illustrative`, the output directory is
 `results/illustrative_heuristic/`; those figures and “improvement” percentages
 are heuristic score comparisons only. Historical heuristic files are kept
 under `results/legacy_heuristic_outputs/` and are not current research results.

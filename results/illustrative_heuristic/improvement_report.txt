@@ -1,0 +1,74 @@
+UNVALIDATED HEURISTIC SCORES: the equation forms and coefficients are project assumptions, not literature-derived correlations or BWRX-300 performance predictions.
+
+BWR startup comparison summary
+This comparison evaluates candidate startup strategies using the configured
+backend. It is not a validated BWRX-300 startup model or operating procedure.
+Built-in heuristic outputs are unvalidated scores, not transient predictions,
+operating limits, or literature-derived correlations.
+
+Priority-based interpretation
+- Stability-priority winner: Conservative Startup
+- Speed-priority winner: Aggressive Startup
+- Cost-priority winner: Aggressive Startup
+- Overall compromise candidate: Optimized Startup
+
+Startup profiles
+Aggressive Startup
+  Type: HOT
+  Initial pressure: 2.000 MPa
+  Initial temperature: 200.0 C
+  Power ramp: 3.000 %FP/min
+  Pressure ramp: 1.000 MPa/min
+  Hold points: 0
+Conservative Startup
+  Type: COLD
+  Initial pressure: 0.100 MPa
+  Initial temperature: 20.0 C
+  Power ramp: 0.500 %FP/min
+  Pressure ramp: 0.100 MPa/min
+  Hold points: 3
+Optimized Startup
+  Type: HOT
+  Initial pressure: 2.000 MPa
+  Initial temperature: 200.0 C
+  Power ramp: 1.869 %FP/min
+  Pressure ramp: 0.184 MPa/min
+  Hold points: 3
+
+Direct metric comparison
+Metric                             Aggressive   Conservative      Optimized    Improvement %
+----------------------------------------------------------------------------------------------
+Flashing-margin score                  -0.062          2.000          7.055         +252.75%
+DWO Index                              50.000         10.000         18.394          -83.94%
+Pressure Oscillation Index             45.200         27.200         31.075          -14.25%
+Thermal Stress                         54.000         36.000         37.672           -4.64%
+Startup Duration                       50.000        405.000        257.237          +36.48%
+Startup Cost                           30.400        236.100        162.386          +31.22%
+
+Baseline versus optimized startup
+The conservative startup profile is used as the baseline reference for the
+comparison. Positive percent change indicates movement in the preferred
+direction for that metric.
+Metric                               Baseline      Optimized    Improvement %
+------------------------------------------------------------------------------
+Flashing-margin score                   2.000          7.055         +252.75%
+DWO Index                              10.000         18.394          -83.94%
+Pressure Oscillation Index             27.200         31.075          -14.25%
+Thermal Stress                         36.000         37.672           -4.64%
+Startup Duration                      405.000        257.237          +36.48%
+Startup Cost                          236.100        162.386          +31.22%
+
+Engineering interpretation
+The optimized profile is selected as a balanced compromise across startup
+duration, startup cost, and stability margins. It is not the lowest-risk profile
+for every metric, and it is not the fastest profile in every case; instead, it
+represents the best overall tradeoff within the modelled startup envelope.
+For a stability-focused startup, the conservative profile remains the best fit.
+For a time- and cost-driven startup, the aggressive profile is preferred.
+For the built-in heuristic only, the optimized profile is the normalized
+score compromise; that label does not establish a physically best procedure.
+Startup cost index = lost_generation_index + operator_intervention_index +
+thermal_stress_penalty.
+The 0.4 MPa cutoff and 0.7 MPa bonus are demonstration assumptions, not
+universal thresholds or validated BWRX-300 stability limits.
+This comparison does not represent validated reactor startup predictions.
